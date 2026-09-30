@@ -203,3 +203,47 @@ decisions are appended to the relevant section.
 45. **Video probing** parses `ffmpeg -i` output (duration, size, fps, rotation
     metadata → width/height swapped for 90° rotations, since ffmpeg autorotates
     on decode).
+
+## UI
+
+46. **Layout:** file strip (150 px) | preview | parameter panel (350 px); at
+    1280×800 the preview gets ~780 px. Below 760 px wide the strip becomes a
+    horizontal row and the panel a fixed bottom sheet (collapsed to a 48 px
+    handle, expands to 62 vh).
+47. **Preview debounce is 90 ms** after the last change (well inside the
+    ≤ 150 ms budget); the preview worker additionally drops queued stale
+    requests, so fast slider drags never pile up work.
+48. **Preview display scale:** shrink smoothly to fit, but only enlarge by
+    whole factors with `image-rendering: pixelated`. Non-integer upscaling of
+    dithered output produced visible moiré (spotted in the M8 screenshots).
+49. **Before/after:** "⇆ split" toggles a draggable divider (off by default so
+    the output is seen whole); Space / "◐ before" shows the original. If
+    geometry changed the output size, both sides are letterboxed (`object-fit:
+    contain`) rather than stretched.
+50. **One instance of each effect**, always present in the pipeline and toggled
+    on/off, rather than an "add effect" menu with duplicates: simpler UI, and
+    presets stay small and comparable.
+51. **Any manual change marks the pipeline "custom"** (used in file names);
+    loading a preset resets stacking unless the preset sets it.
+52. **Batch applies to every loaded file**: images use the chosen image format
+    (PNG if a video format is selected), videos use the chosen video format.
+    Duplicate names in the ZIP get `-2`, `-3` suffixes. ZIP entries are stored
+    (level 0), since PNG/JPEG/MP4 are already compressed.
+
+## Testing & docs
+
+53. **e2e runs against the production build** (`vite build && vite preview`) —
+    what gets deployed — with `E2E_DEV=1` to target the dev server; both were
+    run. Screenshots are written to `glitchlab/screenshots/` (git-ignored;
+    Playwright wipes `test-results/` on every run); the ones used in the README
+    are copied to `glitchlab/docs/screenshots/`.
+54. **UI responsiveness is measured**, not assumed: e2e tests run a
+    `requestAnimationFrame` loop during exports and assert the longest gap is
+    < 500 ms (observed: a few dozen ms).
+55. **The main README lives at the repository root** (replacing the one-line
+    `readme.md` placeholder, renamed rather than duplicated to avoid a
+    `README.md`/`readme.md` clash on case-insensitive file systems);
+    `glitchlab/README.md` points to it.
+56. **Licensing:** the `@ffmpeg/core` wasm build is GPL-2.0-or-later (it
+    includes x264). This is noted in the README because a deployed `dist/`
+    redistributes it.

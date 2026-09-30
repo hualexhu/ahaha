@@ -133,8 +133,14 @@ input[type='color'] { background: none; border: 1px solid var(--line); width: 34
   display: grid;
   place-items: center;
 }
-.frame { position: relative; max-width: 100%; max-height: 100%; line-height: 0; }
-.frame canvas { max-width: 100%; max-height: 100%; display: block; image-rendering: auto; }
+/* sized in JS: fit the viewport, enlarging only by whole factors */
+.frame {
+  position: relative;
+  line-height: 0;
+  box-shadow: 0 0 0 1px var(--line), 0 0 40px #33ff6610;
+}
+.frame canvas { width: 100%; height: 100%; display: block; object-fit: contain; }
+.frame.upscaled canvas { image-rendering: pixelated; }
 .frame .after { position: absolute; inset: 0; width: 100%; height: 100%; }
 .frame .before { visibility: visible; }
 .split-handle {
@@ -170,7 +176,7 @@ input[type='color'] { background: none; border: 1px solid var(--line); width: 34
 .crop-box {
   position: absolute;
   border: 1px solid var(--accent);
-  box-shadow: 0 0 0 9999px #000a;
+  box-shadow: 0 0 0 9999px #000000c8;
   cursor: move;
   touch-action: none;
 }

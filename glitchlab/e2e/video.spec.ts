@@ -36,7 +36,7 @@ test('video: glitch + stacking → MP4 and GIF with the right duration / frame c
   // scrub to the middle: preview follows
   await afterRender(page, () => page.getByTestId('scrubber').fill('1'));
   await expect(page.getByText(/frame 16\/30/)).toBeVisible();
-  await page.screenshot({ path: 'test-results/screens/video-glitch-stack.png' });
+  await page.screenshot({ path: 'screenshots/video-glitch-stack.png' });
 
   // MP4, while checking that the UI thread keeps painting
   await page.getByTestId('video-format').selectOption('mp4');

@@ -1,4 +1,4 @@
-import { useEffect, useRef, type ReactNode } from 'react';
+import { useEffect, useRef, useState, type ReactNode } from 'react';
 import { resolveCrop, ASPECTS } from '../effects/geometry';
 import type { Params } from '../effects/types';
 
@@ -26,8 +26,28 @@ function BitmapCanvas({ bmp, className }: { bmp: ImageBitmap | null; className?:
   return <canvas ref={ref} className={className} />;
 }
 
+/**
+ * Display scale for the preview: shrink smoothly to fit, but only enlarge by
+ * whole factors — non-integer upscaling of dithered/pixel art causes moiré.
+ */
+function useFitScale(viewport: React.RefObject<HTMLDivElement | null>, w: number, h: number): number {
+  const [box, setBox] = useState({ w: 0, h: 0 });
+  useEffect(() => {
+    const el = viewport.current;
+    if (!el) return;
+    const ro = new ResizeObserver(([e]) => setBox({ w: e.contentRect.width, h: e.contentRect.height }));
+    ro.observe(el);
+    return () => ro.disconnect();
+  }, [viewport]);
+  if (!w || !h || !box.w) return 1;
+  const fit = Math.min((box.w - 24) / w, (box.h - 24) / h);
+  return fit >= 1 ? Math.max(1, Math.floor(fit)) : Math.max(0.05, fit);
+}
+
 export function Preview({ before, after, split, onSplit, showBefore, busy, crop, empty }: Props): ReactNode {
   const frameRef = useRef<HTMLDivElement>(null);
+  const viewportRef = useRef<HTMLDivElement>(null);
+  const scale = useFitScale(viewportRef, after?.width ?? 0, after?.height ?? 0);
 
   const startSplitDrag = (e: React.PointerEvent): void => {
     const el = frameRef.current;
@@ -46,7 +66,7 @@ export function Preview({ before, after, split, onSplit, showBefore, busy, crop,
   };
 
   if (!after) {
-    return <div className="viewport">{empty}{busy && <span className="busy-dot">▮ rendering…</span>}</div>;
+    return <div className="viewport" ref={viewportRef}>{empty}{busy && <span className="busy-dot">▮ rendering…</span>}</div>;
   }
 
   // When editing the crop, show the full (uncropped) frame with a box overlay.
@@ -102,8 +122,13 @@ export function Preview({ before, after, split, onSplit, showBefore, busy, crop,
   const sameSize = before && before.width === after.width && before.height === after.height;
   const showSplit = !crop && !showBefore && before && split > 0;
   return (
-    <div className="viewport">
-      <div className="frame" ref={frameRef} data-testid="preview-frame">
+    <div className="viewport" ref={viewportRef}>
+      <div
+        className={'frame' + (scale > 1 ? ' upscaled' : '')}
+        ref={frameRef}
+        data-testid="preview-frame"
+        style={{ width: Math.round(after.width * scale), height: Math.round(after.height * scale) }}
+      >
         {/* base layer defines the frame's size: always the output */}
         <BitmapCanvas bmp={crop ? after : showBefore && before && sameSize ? before : after} className="base" />
         {showBefore && before && !sameSize && <BitmapCanvas bmp={before} className="after" />}

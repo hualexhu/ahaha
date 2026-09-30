@@ -12,7 +12,7 @@ test.describe('image workflow', () => {
       await afterRender(page, () => page.getByTestId('preset-select').selectOption(preset.name));
       await expect(page.getByTestId('status')).toContainText(`preset: ${preset.name}`);
       const slug = preset.name.toLowerCase().replace(/[^a-z0-9]+/g, '-');
-      await page.screenshot({ path: `test-results/screens/preset-${slug}.png` });
+      await page.screenshot({ path: `screenshots/preset-${slug}.png` });
       for (const [format, ext, sig, codec] of [
         ['png', 'png', '89504e47', 'png'],
         ['jpeg', 'jpg', 'ffd8ff', 'mjpeg'],

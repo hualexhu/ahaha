@@ -105,6 +105,8 @@ const scenePng = image('scene.png', 960, 640, scene);
 image('gradient.png', 640, 480, gradient);
 image('bars.png', 640, 360, bars);
 image('noise.png', 320, 240, noise);
+// 12 MP frame for the performance test
+image('large-12mp.png', 4000, 3000, scene);
 
 function ff(args, target) {
   const file = join(out, target);
