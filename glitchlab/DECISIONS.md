@@ -144,3 +144,62 @@ decisions are appended to the relevant section.
     recreated lazily.
 31. **HEIC is not supported** (browsers cannot decode it and a wasm HEIF decoder
     would add megabytes). HEIC files are rejected with a clear message.
+
+## Video
+
+32. **Streaming in chunks.** Frames are decoded with `-ss <t> -i … -frames:v K`
+    into raw RGBA chunks of ≤ 48 MB, processed, and each chunk is encoded to its
+    own segment file (which is then deleted from MEMFS as raw data); segments are
+    joined with ffmpeg's concat demuxer (`-c copy`). Peak memory is one raw
+    chunk plus compressed segments, independent of clip length. (ffmpeg.wasm
+    can't stream stdin/stdout, so this is the practical way to bound memory.)
+33. **Frame-exact output length.** The output has exactly
+    `floor((end − start) / speed × fps)` frames; if the decoder returns fewer
+    at the end of the clip, the last frame is repeated. Tests verify counts.
+34. **Timing filters:** `setpts=(PTS−STARTPTS)/speed, fps=<out>, scale=W:H`.
+    "half" fps = source fps / 2; custom fps 1–60; speed 0.25–4× in the UI
+    (0.1–8× accepted in presets).
+35. **Audio is dropped.** Speed changes, trims and stacking would need matching
+    audio processing; GlitchLab outputs silent video. Documented as a limitation.
+36. **WebM uses VP8** (`libvpx`, realtime/cpu-used 8). VP9 in single-threaded
+    wasm is several times slower; VP8 plays everywhere WebM does.
+37. **MP4 = H.264** (`libx264 veryfast`, CRF 20, yuv420p, GOP = 1 s), `+faststart`.
+    Frames are cropped to even dimensions for yuv420p.
+38. **GIF** is rendered at the chosen GIF fps and width directly (fewer, smaller
+    frames to process; pixel-size params scale along), encoded to a high-quality
+    H.264 intermediate, then a `palettegen (stats_mode=diff)` + `paletteuse
+    (bayer)` pass builds a palette-optimised GIF.
+39. **Caps:** by default clips are downscaled to fit 1920×1080 and limited to
+    60 s after the trim start, with a visible warning (never an error). A
+    "Lift 1080p / 60 s caps" switch removes them at the user's own risk.
+40. **Stacking runs on the source frames, before the effect pipeline** (long
+    exposure is a capture technique, glitches come after). It is a video
+    setting, not a pipeline effect, because its "single still" output mode
+    changes the export type. Rolling window is capped at 30 frames (a ring
+    buffer of full frames; 30 × 1080p ≈ 250 MB). The still mode folds every
+    frame into running sums/max/min: O(1) memory.
+41. **Datamosh-lite interpretation:** every `hold` frames a keyframe is taken;
+    in between, per-block motion between consecutive source frames is estimated
+    by SAD block matching on a ¼-scale luma plane (±12 px) and applied to the
+    *held* picture, plus a configurable share of the frame-to-frame residual —
+    which is what real I-frame-dropping datamoshes look like. The "glitch
+    intensity ramp" is the blend from the real frame to the moshed frame,
+    ramping from `rampFrom` to `rampTo` across each hold. It is a normal,
+    reorderable pipeline effect (so e.g. databend can run after it) and a no-op
+    on stills.
+42. **Parameter animation:** any range parameter can be animated; the slider
+    value is the clip-start value and a second slider sets the clip-end value;
+    `t = frame / (frames − 1)`. The ◆ buttons only appear for videos; still
+    exports use the start value.
+43. **Temporal previews are approximated:** the scrubber preview decodes only
+    the history it needs (stack window − 1 frames, and frames since the last
+    datamosh keyframe), capped at 29 + 40 frames, at preview resolution. For
+    history frames only the pipeline prefix up to datamosh is run
+    (`stopAfter`). The still-stack preview samples ≤ 48 frames evenly; export
+    uses every frame.
+44. **Video → image exports:** with a video loaded, PNG/JPEG/WebP export the
+    frame under the scrubber (rendered as a still) or, in stacking "single
+    still" mode, the full-resolution stack of every frame.
+45. **Video probing** parses `ffmpeg -i` output (duration, size, fps, rotation
+    metadata → width/height swapped for 90° rotations, since ffmpeg autorotates
+    on decode).
