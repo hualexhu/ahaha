@@ -11,6 +11,7 @@
     "lint": "eslint .",
     "test": "vitest run",
     "fixtures": "node scripts/gen-fixtures.mjs",
+    "preset-sheet": "node scripts/gen-fixtures.mjs && vitest run -c tests/tools/vitest.config.ts",
     "test:e2e": "node scripts/gen-fixtures.mjs && playwright test"
   },
   "dependencies": {
