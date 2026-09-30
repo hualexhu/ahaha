@@ -1,0 +1,16 @@
+{
+  "name": "honeybelle",
+  "private": true,
+  "description": "Repository root. The GlitchLab web app lives in ./glitchlab (npm workspace).",
+  "workspaces": ["glitchlab"],
+  "scripts": {
+    "dev": "npm run dev -w glitchlab",
+    "build": "npm run build -w glitchlab",
+    "preview": "npm run preview -w glitchlab",
+    "typecheck": "npm run typecheck -w glitchlab",
+    "lint": "npm run lint -w glitchlab",
+    "test": "npm run test -w glitchlab",
+    "test:e2e": "npm run test:e2e -w glitchlab",
+    "fixtures": "npm run fixtures -w glitchlab"
+  }
+}

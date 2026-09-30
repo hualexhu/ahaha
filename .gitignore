@@ -15,3 +15,11 @@
 /log/*
 !/log/.keep
 /tmp
+
+# GlitchLab (Node)
+node_modules/
+/reference/
+glitchlab/dist/
+glitchlab/fixtures/
+glitchlab/test-results/
+glitchlab/playwright-report/
