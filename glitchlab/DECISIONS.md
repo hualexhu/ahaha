@@ -247,3 +247,7 @@ decisions are appended to the relevant section.
 56. **Licensing:** the `@ffmpeg/core` wasm build is GPL-2.0-or-later (it
     includes x264). This is noted in the README because a deployed `dist/`
     redistributes it.
+57. **Root proxy scripts end in `--`** (`npm run dev -w glitchlab --`) so extra
+    arguments reach the tool: without it, `npm run dev -- --port 3000` at the
+    root had npm swallow `--port` as its own config (found in the clean-clone
+    check).
