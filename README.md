@@ -76,6 +76,23 @@ Netlify, S3 etc. are fine.
    Exports are rendered at full resolution in a background worker. The
    progress card shows an ETA and a **Cancel** button.
 
+### Browser support
+
+GlitchLab needs Web Workers, `OffscreenCanvas` (2D) and `createImageBitmap`:
+**Chrome / Edge 99+, Firefox 105+, Safari 16.4+** (video also needs
+WebAssembly, which all of these have). Older browsers get a clear message
+instead of a broken page.
+
+* Chromium is tested end to end. Safari and Firefox quirks are covered by
+  tests that simulate them in Chromium (see `glitchlab/e2e/compat.spec.ts`).
+  They haven't been run on real Safari/Firefox machines yet.
+* **Safari can't encode WebP** from a canvas (it silently produces a PNG).
+  GlitchLab detects this and encodes WebP with the libwebp encoder inside
+  ffmpeg.wasm instead, so a `.webp` export is always a real WebP.
+* **iOS Safari limits canvases to ~16.7 MP**, while recent iPhones shoot 24 MP.
+  If the browser refuses a full-size canvas, the image is scaled down to fit and
+  the export message says so.
+
 ### Keyboard
 
 | Key | Action |
@@ -308,7 +325,9 @@ File names: `<original>_glitchlab_<preset-or-custom>_<seed>.<ext>`, e.g.
   runs at ≤ 720 px, so glitches look proportionally coarser there than in a
   full-resolution export. "Bytes / MP" keeps the *amount* of damage consistent.
 * ASCII glyphs use the platform's monospace font, so exports can differ
-  slightly between operating systems. Everything else is deterministic across
+  slightly between operating systems.
+* On iOS Safari, very large photos are scaled to ≤ 16 MP (the browser's canvas
+  limit), and long or high-resolution videos may run out of memory. Everything else is deterministic across
   machines.
 * Cancelling terminates the export worker; the next export reloads ffmpeg.wasm
   (~1–2 s).

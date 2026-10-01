@@ -60,19 +60,21 @@ export function Switch({ checked, onChange, label, id, dataEnable, dataParam, ar
   dataParam?: string;
   ariaLabel?: string;
 }): ReactNode {
+  // The knob is drawn on a sibling span: pseudo-elements on <input> don't render in every browser.
   const input = (
-    <input
-      id={id}
-      type="checkbox"
-      role="switch"
-      className="switch"
-      checked={checked}
-      aria-label={ariaLabel}
-      data-enable={dataEnable}
-      data-param={dataParam}
-      onChange={(e) => onChange(e.target.checked)}
-      onClick={(e) => e.stopPropagation()}
-    />
+    <span className="switch" onClick={(e) => e.stopPropagation()}>
+      <input
+        id={id}
+        type="checkbox"
+        role="switch"
+        checked={checked}
+        aria-label={ariaLabel}
+        data-enable={dataEnable}
+        data-param={dataParam}
+        onChange={(e) => onChange(e.target.checked)}
+      />
+      <span className="switch-track" aria-hidden="true" />
+    </span>
   );
   if (!label) return input;
   return (

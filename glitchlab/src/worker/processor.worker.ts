@@ -59,10 +59,8 @@ async function openVideo(path: string, file: Blob): Promise<VideoMeta> {
 // ---------------------------------------------------------------- open
 async function handleOpen(fileId: string, file: Blob, kind: FileKind): Promise<{ meta: FileMeta; thumb: ImageBitmap }> {
   if (kind === 'image') {
-    const probeBmp = await createImageBitmap(file);
-    const meta: FileMeta = { kind, width: probeBmp.width, height: probeBmp.height, warnings: [] };
-    probeBmp.close();
-    const preview = await decodeImageFile(file, PREVIEW_EDGE);
+    const { img: preview, sourceWidth, sourceHeight } = await decodeImageFile(file, PREVIEW_EDGE);
+    const meta: FileMeta = { kind, width: sourceWidth, height: sourceHeight, warnings: [] };
     const t = fitLongEdge(preview.width, preview.height, 160);
     files.set(fileId, { kind, meta, preview });
     return { meta, thumb: imgToBitmap(resizeArea(preview, t.width, t.height)) };
@@ -216,8 +214,11 @@ async function withVideo<T>(file: Blob, fn: (path: string, meta: VideoMeta) => P
 }
 
 /** Full-resolution source for a still export (image, or one video frame / still stack). */
-async function fullResSource(file: Blob, kind: FileKind, video: VideoSettings, time: number, onProgress?: (p: Progress) => void): Promise<{ img: Img; isVideo: boolean }> {
-  if (kind === 'image') return { img: await decodeImageFile(file), isVideo: false };
+async function fullResSource(file: Blob, kind: FileKind, video: VideoSettings, time: number, onProgress?: (p: Progress) => void): Promise<{ img: Img; isVideo: boolean; note?: string }> {
+  if (kind === 'image') {
+    const d = await decodeImageFile(file);
+    return { img: d.img, isVideo: false, note: d.note };
+  }
   const v = normalizeVideo(video);
   return withVideo(file, async (path, meta) => {
     const plan = planVideo(meta, v);
@@ -234,10 +235,11 @@ async function fullResSource(file: Blob, kind: FileKind, video: VideoSettings, t
 }
 
 async function exportImage(req: Extract<Request, { type: 'exportImage' }>, id: number): Promise<ExportResult> {
-  const { img } = await fullResSource(req.file, req.kind, req.video, req.time, (p) => post({ id, kind: 'progress', progress: p }));
+  const { img, note } = await fullResSource(req.file, req.kind, req.video, req.time, (p) => post({ id, kind: 'progress', progress: p }));
   post({ id, kind: 'progress', progress: { done: 0, total: 1, label: 'rendering' } });
   // a still exported from a video is rendered as a still (temporal effects are no-ops)
   const res = runPipeline(img, req.pipeline, { glyphs, scale: 1, isVideo: false });
+  if (note) res.side.notes.unshift(note);
   const fmt = req.options.imageFormat;
   if (fmt === 'jpeg-raw') {
     if (!res.side.jpegBytes) throw new Error('Enable the JPEG Databend effect to export the raw glitched JPEG.');

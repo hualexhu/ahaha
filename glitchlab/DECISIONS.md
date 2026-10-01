@@ -293,3 +293,29 @@ decisions are appended to the relevant section.
 67. e2e selectors moved from `<select>`s to the segmented controls'
     `data-testid`s (`fmt-png`, `v-stack-mode-lighten`, …); a `screens.spec.ts`
     captures the design screenshots used in the README.
+
+## Cross-browser hardening
+
+68. **Only Chromium can be automated here**, so Safari/Firefox behaviour is
+    covered by *simulation*: `e2e/compat.spec.ts` intercepts the worker script
+    and prepends a patch that reproduces a browser quirk, then checks the app
+    copes. Each test was confirmed to fail on the code before the fix.
+69. **WebP on Safari:** `convertToBlob({type:'image/webp'})` returns a PNG
+    there. Every canvas encode now checks the returned MIME type; WebP falls
+    back to ffmpeg.wasm's libwebp (lazy-loaded chunk), other formats fail with
+    a clear message instead of a mislabelled file.
+70. **Decode always draws at the target size.** Resizing via
+    `createImageBitmap` options is an optimisation, not a requirement, so an
+    engine that ignores the options still gets a scaled (not cropped) preview.
+    Opening an image now decodes it once instead of twice.
+71. **Canvas size limits (iOS Safari ~16.7 MP):** if a full-size canvas is
+    refused, decode retries at ≤ 16 MP and keeps halving the area until the
+    browser accepts it; the export message says the image was scaled.
+72. **Switches no longer rely on `::after` on `<input>`** (not rendered by every
+    engine): the input is an invisible hit target over a drawn `<span>` track.
+    Also added `-webkit-backdrop-filter` (Safari < 18), `-webkit-appearance`
+    on selects and hidden number spinners in Firefox.
+73. **Feature detection at startup:** without Web Workers, `OffscreenCanvas` 2D
+    or `createImageBitmap` the empty state explains what is missing and which
+    browsers work, and file picking is disabled. Missing WebAssembly only
+    disables video.

@@ -11,6 +11,9 @@ import { EffectPanel } from './ui/EffectPanel';
 import { ACCEPT, FileStrip, classify, type LoadedFile } from './ui/FileStrip';
 import { Segmented, Slider } from './ui/Controls';
 import { Icon } from './ui/Icons';
+import { browserGaps, SUPPORTED_BROWSERS } from './ui/support';
+
+const GAPS = browserGaps();
 import { Preview } from './ui/Preview';
 import { VideoPanel } from './ui/VideoPanel';
 
@@ -316,7 +319,19 @@ export default function App(): ReactNode {
         <div className="empty-mark" aria-hidden="true"><span /><span /><span /></div>
         <h1>Drop photos or videos</h1>
         <p>JPEG, PNG and WebP images. MP4, WebM and MOV clips.<br />Nothing is uploaded: every pixel is processed on this device.</p>
-        <button type="button" className="btn btn-primary btn-lg" onClick={() => fileInputRef.current?.click()}>
+        {GAPS.blocking.length > 0 && (
+          <div className="notice notice-err" data-testid="unsupported">
+            <Icon name="warn" size={15} />
+            <span>This browser is missing {GAPS.blocking.join(', ')}, which GlitchLab needs to process images. Please use {SUPPORTED_BROWSERS}.</span>
+          </div>
+        )}
+        {GAPS.blocking.length === 0 && GAPS.video.length > 0 && (
+          <div className="notice">
+            <Icon name="warn" size={15} />
+            <span>Video needs {GAPS.video.join(', ')}, which this browser doesn't provide. Photos work normally.</span>
+          </div>
+        )}
+        <button type="button" className="btn btn-primary btn-lg" disabled={GAPS.blocking.length > 0} onClick={() => fileInputRef.current?.click()}>
           <Icon name="upload" size={16} /> Choose files
         </button>
         <div className="shortcuts">
