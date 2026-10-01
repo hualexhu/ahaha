@@ -1,5 +1,6 @@
-import { useEffect, useRef, useState, type ReactNode } from 'react';
+import { useEffect, useRef, type ReactNode } from 'react';
 import type { FileKind, FileMeta } from '../worker/protocol';
+import { Icon } from './Icons';
 
 export interface LoadedFile {
   id: string;
@@ -14,6 +15,8 @@ export interface LoadedFile {
 const VIDEO_EXT = /\.(mp4|m4v|mov|webm|mkv)$/i;
 const IMAGE_EXT = /\.(jpe?g|png|webp|gif|bmp|avif)$/i;
 const HEIC_EXT = /\.(heic|heif)$/i;
+
+export const ACCEPT = 'image/jpeg,image/png,image/webp,video/mp4,video/webm,video/quicktime,.mov,.mp4,.webm';
 
 export function classify(f: File): FileKind | 'heic' | null {
   if (HEIC_EXT.test(f.name) || /heic|heif/.test(f.type)) return 'heic';
@@ -37,56 +40,39 @@ interface Props {
   files: LoadedFile[];
   activeId: string | null;
   onSelect: (id: string) => void;
-  onAdd: (files: File[]) => void;
+  onPick: () => void;
   onRemove: (id: string) => void;
 }
 
-export function FileStrip({ files, activeId, onSelect, onAdd, onRemove }: Props): ReactNode {
-  const input = useRef<HTMLInputElement>(null);
-  const [drag, setDrag] = useState(false);
+export function FileStrip({ files, activeId, onSelect, onPick, onRemove }: Props): ReactNode {
   return (
-    <aside className="strip" aria-label="Files">
-      <div
-        className={'dropzone' + (drag ? ' drag' : '')}
-        onClick={() => input.current?.click()}
-        onDragOver={(e) => { e.preventDefault(); setDrag(true); }}
-        onDragLeave={() => setDrag(false)}
-        onDrop={(e) => {
-          e.preventDefault();
-          setDrag(false);
-          onAdd(Array.from(e.dataTransfer.files));
-        }}
-        role="button"
-        tabIndex={0}
-      >
-        ⊕ drop files<br />or click
-        <input
-          ref={input}
-          type="file"
-          data-testid="file-input"
-          multiple
-          accept="image/jpeg,image/png,image/webp,video/mp4,video/webm,video/quicktime,.mov,.mp4,.webm"
-          style={{ display: 'none' }}
-          onChange={(e) => {
-            onAdd(Array.from(e.target.files ?? []));
-            e.target.value = '';
-          }}
-        />
+    <aside className="rail" aria-label="Files">
+      <button type="button" className="rail-add" onClick={onPick} title="Add photos or videos" aria-label="Add files">
+        <Icon name="plus" size={18} />
+      </button>
+      <div className="rail-list">
+        {files.map((f) => (
+          <div
+            key={f.id}
+            className={'thumb' + (f.id === activeId ? ' active' : '') + (f.error ? ' error' : '')}
+            onClick={() => onSelect(f.id)}
+            data-testid="thumb"
+            title={f.name}
+            role="button"
+            tabIndex={0}
+            onKeyDown={(e) => e.key === 'Enter' && onSelect(f.id)}
+          >
+            <div className="thumb-img">
+              {f.thumb ? <Thumb bmp={f.thumb} /> : <span className="thumb-loading">{f.error ? <Icon name="warn" size={16} /> : <span className="spinner" />}</span>}
+              {f.kind === 'video' && <span className="badge"><Icon name="play" size={8} /></span>}
+            </div>
+            <span className="name">{f.name}</span>
+            <button type="button" className="thumb-x" aria-label={`Remove ${f.name}`} onClick={(e) => { e.stopPropagation(); onRemove(f.id); }}>
+              <Icon name="close" size={10} />
+            </button>
+          </div>
+        ))}
       </div>
-      {files.map((f) => (
-        <div
-          key={f.id}
-          className={'thumb' + (f.id === activeId ? ' active' : '')}
-          onClick={() => onSelect(f.id)}
-          data-testid="thumb"
-          title={f.name}
-        >
-          {f.thumb ? <Thumb bmp={f.thumb} /> : <div className="loading">{f.error ? '⚠ error' : 'loading…'}</div>}
-          <span className="badge">{f.kind === 'video' ? '▶ VID' : 'IMG'}</span>
-          <span className="name">{f.name}</span>
-          <button className="x small" aria-label={`Remove ${f.name}`} onClick={(e) => { e.stopPropagation(); onRemove(f.id); }}>×</button>
-        </div>
-      ))}
     </aside>
   );
 }

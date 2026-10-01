@@ -8,7 +8,9 @@ import type { Params } from './effects/types';
 import { CancelledError, SupersededError, WorkerClient } from './worker/client';
 import type { ExportOptions, ExportResult, FileMeta, ImageExportFormat, PreviewResult, Progress, VideoExportFormat } from './worker/protocol';
 import { EffectPanel } from './ui/EffectPanel';
-import { FileStrip, classify, type LoadedFile } from './ui/FileStrip';
+import { ACCEPT, FileStrip, classify, type LoadedFile } from './ui/FileStrip';
+import { Segmented, Slider } from './ui/Controls';
+import { Icon } from './ui/Icons';
 import { Preview } from './ui/Preview';
 import { VideoPanel } from './ui/VideoPanel';
 
@@ -60,6 +62,16 @@ export default function App(): ReactNode {
   const [opts, setOpts] = useState<ExportOptions>({ imageFormat: 'png', videoFormat: 'mp4', quality: 0.9, gifFps: 12, gifWidth: 480 });
   const [videoTarget, setVideoTarget] = useState<'video' | StillFmt>('video');
   const importRef = useRef<HTMLInputElement>(null);
+  const fileInputRef = useRef<HTMLInputElement>(null);
+  const [presetMenu, setPresetMenu] = useState(false);
+  const [dragging, setDragging] = useState(0);
+
+  // toasts fade away on their own
+  useEffect(() => {
+    if (!message) return;
+    const t = setTimeout(() => setMessage(null), message.kind === 'err' ? 12_000 : 8_000);
+    return () => clearTimeout(t);
+  }, [message]);
 
   const active = files.find((f) => f.id === activeId) ?? null;
   const isVideo = active?.kind === 'video';
@@ -161,6 +173,7 @@ export default function App(): ReactNode {
     saveUserPresets(next);
     setPresetName(name);
     setNewPresetName('');
+    setPresetMenu(false);
     setMessage({ text: `Saved preset “${name}”.` });
   };
   const deletePreset = (): void => {
@@ -169,11 +182,13 @@ export default function App(): ReactNode {
     setUserPresets(next);
     saveUserPresets(next);
     setMessage({ text: `Deleted preset “${presetName}”.` });
+    setPresetMenu(false);
     setPresetName(null);
   };
   const exportPresets = (): void => {
     const list = userPresets.length ? userPresets : [{ name: presetName ?? 'custom', pipeline, video }];
     download(new Blob([exportPresetsJson(list)], { type: 'application/json' }), 'glitchlab-presets.json');
+    setPresetMenu(false);
   };
   const importPresets = async (file: File): Promise<void> => {
     try {
@@ -248,6 +263,7 @@ export default function App(): ReactNode {
         exportRef.current();
         return;
       }
+      if (e.key === 'Escape') { setPresetMenu(false); return; }
       if (typing || e.metaKey || e.ctrlKey || e.altKey) return;
       if (e.code === 'Space') {
         e.preventDefault();
@@ -277,28 +293,116 @@ export default function App(): ReactNode {
   const plan = isVideo && active?.meta ? planVideo({ width: active.meta.width, height: active.meta.height, duration: active.meta.duration ?? 0, fps: active.meta.fps ?? 30 }, video) : null;
   const pct = job?.progress && job.progress.total ? Math.min(100, (job.progress.done / job.progress.total) * 100) : 0;
 
+  const imgFormats: { value: ImageExportFormat; label: string; disabled?: boolean; title?: string }[] = [
+    { value: 'png', label: 'PNG' },
+    { value: 'jpeg', label: 'JPEG' },
+    { value: 'webp', label: 'WebP' },
+    { value: 'jpeg-raw', label: 'Raw JPG', disabled: !hasEnabled(pipeline, 'databend'), title: 'The corrupted JPEG bytes exactly as produced by the databend stage' },
+  ];
+  const videoMain = stillOnly ? 'still' : videoTarget === 'video' ? opts.videoFormat : 'still';
+  const stillFmt: StillFmt = videoTarget === 'video' ? 'png' : videoTarget;
+  const exportLabel = !isVideo
+    ? opts.imageFormat === 'jpeg-raw' ? 'raw JPEG' : opts.imageFormat === 'jpeg' ? 'JPEG' : opts.imageFormat === 'webp' ? 'WebP' : 'PNG'
+    : videoMain === 'still'
+      ? `${stillOnly ? 'still' : 'frame'} · ${stillFmt === 'jpeg' ? 'JPEG' : stillFmt === 'webp' ? 'WebP' : 'PNG'}`
+      : opts.videoFormat.toUpperCase();
+  const showQuality = (!isVideo && (opts.imageFormat === 'jpeg' || opts.imageFormat === 'webp')) || (isVideo && videoMain === 'still' && (stillFmt === 'jpeg' || stillFmt === 'webp'));
+  const readyCount = files.filter((f) => f.meta).length;
+  const fmtTime = (t: number): string => `${String(Math.floor(t / 60)).padStart(2, '0')}:${(t % 60).toFixed(2).padStart(5, '0')}`;
+
   const emptyView = (
     <div className="empty">
-      <div style={{ fontSize: 28, color: 'var(--accent)', textShadow: '0 0 12px #33ff66' }}>▚▞ GLITCHLAB</div>
-      <div>Drop images (JPEG · PNG · WebP) or videos (MP4 · WebM · MOV) anywhere,<br />or use the <b>⊕</b> box on the left. Files never leave your browser.</div>
-      <div className="hint"><kbd>Space</kbd> before/after · <kbd>R</kbd> reroll seed · <kbd>Ctrl/⌘ E</kbd> export</div>
+      <div className="empty-card">
+        <div className="empty-mark" aria-hidden="true"><span /><span /><span /></div>
+        <h1>Drop photos or videos</h1>
+        <p>JPEG, PNG and WebP images. MP4, WebM and MOV clips.<br />Nothing is uploaded: every pixel is processed on this device.</p>
+        <button type="button" className="btn btn-primary btn-lg" onClick={() => fileInputRef.current?.click()}>
+          <Icon name="upload" size={16} /> Choose files
+        </button>
+        <div className="shortcuts">
+          <span><kbd>Space</kbd> before / after</span>
+          <span><kbd>R</kbd> new seed</span>
+          <span><kbd>⌘</kbd><kbd>E</kbd> export</span>
+        </div>
+      </div>
     </div>
   );
 
+  const stageOverlay = active ? (
+    <>
+      <div className="chips">
+        {active && preview && (
+          <div className="chip" data-testid="status">
+            <span className="chip-strong">{active.name}</span>
+            <span className="mono">{active.meta?.width}×{active.meta?.height}{preview.outWidth !== active.meta?.width || preview.outHeight !== active.meta?.height ? ` → ${preview.outWidth}×${preview.outHeight}` : ''}</span>
+            <span className="mono dim">{Math.round(preview.ms)} ms</span>
+          </div>
+        )}
+        {preview?.notes.length ? <div className="chip chip-warn"><Icon name="warn" size={12} /> {[...new Set(preview.notes)].join(' · ')}</div> : null}
+        {previewError && <div className="chip chip-err"><Icon name="warn" size={12} /> {previewError}</div>}
+      </div>
+      <div className={'render-state' + (previewBusy ? ' on' : '')} aria-live="polite">
+        <span className="spinner" /> Rendering
+      </div>
+      {cropEditing && <div className="crop-hint">Drag the box to move it · drag the corner to resize</div>}
+      <div className="toolbar" role="toolbar" aria-label="View">
+        <button type="button" className={'tool' + (split > 0 ? ' on' : '')} aria-pressed={split > 0} aria-label="Split view" title="Before / after split" onClick={() => setSplit(split > 0 ? 0 : 0.5)}>
+          <Icon name="split" size={16} /><span>Compare</span>
+        </button>
+        <button type="button" className={'tool' + (showBefore ? ' on' : '')} aria-pressed={showBefore} aria-label="Show original" title="Show original (Space)" onClick={() => setShowBefore(!showBefore)}>
+          <Icon name="eye" size={16} /><span>Original</span>
+        </button>
+        <span className="tool-sep" />
+        <button type="button" className="tool" aria-label="Reroll seed (toolbar)" title="New seed (R)" onClick={reroll}>
+          <Icon name="dice" size={16} /><span>Reroll</span>
+        </button>
+      </div>
+      {job && (
+        <div className="progress-card" data-testid="progress" role="status">
+          <div className="progress-top">
+            <span className="progress-label">{job.label}</span>
+            <span className="mono dim">{Math.round(pct)}%</span>
+          </div>
+          <div className="bar"><i style={{ width: `${pct}%` }} /></div>
+          <div className="progress-bottom">
+            <span className="dim">{job.progress?.label ?? 'Starting…'}</span>
+            <button type="button" className="btn btn-ghost btn-sm" onClick={cancelExport} data-testid="cancel-export">Cancel</button>
+          </div>
+        </div>
+      )}
+    </>
+  ) : null;
+
   return (
     <div
-      className="app"
+      className={'app' + (dragging > 0 ? ' dragging' : '')}
+      onDragEnter={(e) => { if (e.dataTransfer.types.includes('Files')) setDragging((d) => d + 1); }}
+      onDragLeave={(e) => { if (e.dataTransfer.types.includes('Files')) setDragging((d) => Math.max(0, d - 1)); }}
       onDragOver={(e) => e.preventDefault()}
       onDrop={(e) => {
         e.preventDefault();
+        setDragging(0);
         if (e.dataTransfer.files.length) addFiles(Array.from(e.dataTransfer.files));
       }}
     >
+      <input
+        ref={fileInputRef}
+        type="file"
+        data-testid="file-input"
+        multiple
+        accept={ACCEPT}
+        hidden
+        onChange={(e) => { addFiles(Array.from(e.target.files ?? [])); e.target.value = ''; }}
+      />
       <header className="topbar">
-        <span className="logo">▚ GLITCHLAB<small>photo &amp; video databender</small></span>
-        <div className="presets">
-          <select aria-label="Preset" data-testid="preset-select" value={presetName ?? ''} onChange={(e) => applyPreset(e.target.value)}>
-            <option value="">— custom —</option>
+        <div className="brand">
+          <span className="brand-mark" aria-hidden="true"><span /><span /><span /></span>
+          <span className="brand-name">GlitchLab</span>
+        </div>
+        <div className="preset-picker">
+          <label htmlFor="preset" className="eyebrow">Preset</label>
+          <select id="preset" aria-label="Preset" data-testid="preset-select" value={presetName ?? ''} onChange={(e) => applyPreset(e.target.value)}>
+            <option value="">Custom</option>
             <optgroup label="Built-in">
               {BUILTIN_PRESETS.map((p) => <option key={p.name} value={p.name}>{p.name}</option>)}
             </optgroup>
@@ -308,25 +412,48 @@ export default function App(): ReactNode {
               </optgroup>
             )}
           </select>
-          <input type="text" placeholder="preset name" aria-label="New preset name" value={newPresetName} onChange={(e) => setNewPresetName(e.target.value)} onKeyDown={(e) => e.key === 'Enter' && savePreset()} />
-          <button onClick={savePreset} disabled={!newPresetName.trim()}>Save</button>
-          <button onClick={deletePreset} disabled={!presetName || BUILTIN_PRESETS.some((b) => b.name === presetName)}>Delete</button>
-          <button onClick={exportPresets} title="Download presets as JSON">JSON ↓</button>
-          <button onClick={() => importRef.current?.click()} title="Import presets from JSON">JSON ↑</button>
-          <input ref={importRef} type="file" accept="application/json,.json" style={{ display: 'none' }} data-testid="preset-import"
+          <div className="popover-anchor">
+            <button type="button" className={'icon-btn' + (presetMenu ? ' on' : '')} aria-label="Preset options" aria-expanded={presetMenu} onClick={() => setPresetMenu(!presetMenu)}>
+              <Icon name="more" size={16} />
+            </button>
+            {presetMenu && (
+              <>
+                <div className="popover-backdrop" onClick={() => setPresetMenu(false)} />
+                <div className="popover" role="dialog" aria-label="Preset options">
+                  <div className="popover-title">Save current settings</div>
+                  <div className="row-gap">
+                    <input type="text" className="text-input" placeholder="Preset name" aria-label="New preset name" value={newPresetName}
+                      onChange={(e) => setNewPresetName(e.target.value)} onKeyDown={(e) => e.key === 'Enter' && savePreset()} />
+                    <button type="button" className="btn btn-primary btn-sm" onClick={savePreset} disabled={!newPresetName.trim()}>Save</button>
+                  </div>
+                  <div className="menu">
+                    <button type="button" className="menu-item" onClick={deletePreset} disabled={!presetName || BUILTIN_PRESETS.some((b) => b.name === presetName)}>
+                      <Icon name="trash" size={14} /> Delete
+                      <span className="dim">{presetName && !BUILTIN_PRESETS.some((b) => b.name === presetName) ? presetName : 'saved presets only'}</span>
+                    </button>
+                    <button type="button" className="menu-item" onClick={() => { importRef.current?.click(); setPresetMenu(false); }}>
+                      <Icon name="upload" size={14} /> Import JSON
+                    </button>
+                    <button type="button" className="menu-item" onClick={exportPresets}>
+                      <Icon name="download" size={14} /> Export JSON
+                    </button>
+                  </div>
+                </div>
+              </>
+            )}
+          </div>
+          <input ref={importRef} type="file" accept="application/json,.json" hidden data-testid="preset-import"
             onChange={(e) => { const f = e.target.files?.[0]; if (f) void importPresets(f); e.target.value = ''; }} />
         </div>
         <span className="spacer" />
-        <div className="seed">
-          <label htmlFor="seed">seed</label>
-          <input id="seed" type="number" value={pipeline.seed} onChange={(e) => setPipeline({ ...pipeline, seed: Math.max(0, Math.floor(Number(e.target.value) || 0)) })} />
-          <button onClick={reroll} title="Reroll seed (R)" aria-label="Reroll seed">⟳</button>
+        <div className="seed-pill" title="Same seed + same settings = identical output">
+          <label htmlFor="seed" className="eyebrow">Seed</label>
+          <input id="seed" type="number" className="mono" value={pipeline.seed} onChange={(e) => setPipeline({ ...pipeline, seed: Math.max(0, Math.floor(Number(e.target.value) || 0)) })} />
+          <button type="button" className="icon-btn" onClick={reroll} title="Reroll seed (R)" aria-label="Reroll seed"><Icon name="dice" size={16} /></button>
         </div>
-        <button className={split > 0 ? 'on' : ''} onClick={() => setSplit(split > 0 ? 0 : 0.5)} title="Before/after split view">⇆ split</button>
-        <button className={showBefore ? 'on' : ''} onClick={() => setShowBefore(!showBefore)} title="Show original (Space)">◐ before</button>
       </header>
 
-      <FileStrip files={files} activeId={activeId} onSelect={setActiveId} onAdd={addFiles} onRemove={removeFile} />
+      <FileStrip files={files} activeId={activeId} onSelect={setActiveId} onPick={() => fileInputRef.current?.click()} onRemove={removeFile} />
 
       <main className="stage" data-testid="stage" data-renders={renders} data-busy={previewBusy ? 'true' : 'false'}>
         <Preview
@@ -335,13 +462,13 @@ export default function App(): ReactNode {
           split={split}
           onSplit={setSplit}
           showBefore={showBefore}
-          busy={previewBusy}
           crop={cropProps}
-          empty={active ? <div className="empty">{active.error ? `⚠ ${active.error}` : 'decoding…'}</div> : emptyView}
+          overlay={stageOverlay}
+          empty={active ? <div className="empty"><div className="loading-state">{active.error ? <><Icon name="warn" size={18} /> {active.error}</> : <><span className="spinner" /> Decoding {active.name}…</>}</div></div> : emptyView}
         />
         {isVideo && active?.meta && plan && !stillOnly && (
-          <div className="scrubber">
-            <span>▶</span>
+          <div className="timeline">
+            <span className="tl-icon"><Icon name="film" size={15} /></span>
             <input
               type="range"
               aria-label="Scrub video"
@@ -350,89 +477,85 @@ export default function App(): ReactNode {
               max={Math.max(plan.start, plan.end - 0.001)}
               step={0.01}
               value={Math.min(Math.max(time, plan.start), plan.end)}
+              style={{ '--p': `${plan.end > plan.start ? ((Math.min(Math.max(time, plan.start), plan.end) - plan.start) / (plan.end - plan.start)) * 100 : 0}%` } as React.CSSProperties}
               onChange={(e) => setTime(parseFloat(e.target.value))}
             />
-            <span>{time.toFixed(2)}s · frame {(preview?.frameIndex ?? 0) + 1}/{plan.frames}</span>
+            <span className="timecode mono">{fmtTime(time)}</span>
+            <span className="frame-count mono">frame {(preview?.frameIndex ?? 0) + 1}/{plan.frames}</span>
           </div>
         )}
-        {job && (
-          <div className="progress" data-testid="progress">
-            <span>{job.label}</span>
-            <div className="bar"><i style={{ width: `${pct}%` }} /></div>
-            <span>{job.progress?.label ?? 'starting…'}</span>
-            <button onClick={cancelExport} data-testid="cancel-export">✕ Cancel</button>
+        {message && (
+          <div className={'toast ' + (message.kind ?? 'ok')} data-testid="message" role="status">
+            <Icon name={message.kind ? 'warn' : 'check'} size={14} />
+            <span>{message.text}</span>
+            <button type="button" className="icon-btn tiny" aria-label="Dismiss" onClick={() => setMessage(null)}><Icon name="close" size={11} /></button>
           </div>
         )}
-        <div className="statusbar" data-testid="status">
-          {active && preview && (
-            <span>
-              {active.meta?.width}×{active.meta?.height} → {preview.outWidth}×{preview.outHeight} · preview {preview.after.width}×{preview.after.height} in {Math.round(preview.ms)} ms
-            </span>
-          )}
-          <span>preset: {presetName ?? 'custom'} · seed {pipeline.seed}</span>
-          {preview?.notes.length ? <span className="warn">{[...new Set(preview.notes)].join(' · ')}</span> : null}
-          {previewError && <span className="err">preview: {previewError}</span>}
-          {message && <span className={message.kind ?? ''} data-testid="message">{message.text}</span>}
-        </div>
       </main>
 
-      <aside className={'panel' + (sheetOpen ? ' open' : '')} aria-label="Parameters">
-        <button className="sheet-handle" onClick={() => setSheetOpen(!sheetOpen)}>{sheetOpen ? '▾ hide controls' : '▴ effects & export'}</button>
-        <div className="export">
-          <div className="row">
-            <label>Export</label>
-            {!isVideo ? (
-              <select aria-label="Image format" data-testid="image-format" value={opts.imageFormat} onChange={(e) => setOpts({ ...opts, imageFormat: e.target.value as ImageExportFormat })}>
-                <option value="png">PNG</option>
-                <option value="jpeg">JPEG</option>
-                <option value="webp">WebP</option>
-                <option value="jpeg-raw" disabled={!hasEnabled(pipeline, 'databend')}>Glitched JPEG (raw bytes)</option>
-              </select>
-            ) : (
-              <select aria-label="Video format" data-testid="video-format"
-                value={stillOnly ? (videoTarget === 'video' ? 'png' : videoTarget) : videoTarget === 'video' ? opts.videoFormat : videoTarget}
-                onChange={(e) => {
-                  const v = e.target.value;
-                  if (v === 'mp4' || v === 'webm' || v === 'gif') { setVideoTarget('video'); setOpts({ ...opts, videoFormat: v as VideoExportFormat }); }
-                  else setVideoTarget(v as StillFmt);
-                }}>
-                {!stillOnly && <option value="mp4">MP4 (H.264)</option>}
-                {!stillOnly && <option value="webm">WebM (VP8)</option>}
-                {!stillOnly && <option value="gif">Animated GIF</option>}
-                <option value="png">{stillOnly ? 'PNG still' : 'PNG (current frame)'}</option>
-                <option value="jpeg">{stillOnly ? 'JPEG still' : 'JPEG (current frame)'}</option>
-                <option value="webp">{stillOnly ? 'WebP still' : 'WebP (current frame)'}</option>
-              </select>
-            )}
-            <button className="primary" data-testid="export" disabled={!active?.meta || !!job} onClick={exportCurrent} title="Ctrl/⌘+E">⤓ Export</button>
-          </div>
-          {((!isVideo && (opts.imageFormat === 'jpeg' || opts.imageFormat === 'webp')) || (isVideo && (videoTarget === 'jpeg' || videoTarget === 'webp'))) && (
-            <div className="row">
-              <label htmlFor="quality">Quality</label>
-              <input id="quality" type="range" min={0.1} max={1} step={0.01} value={opts.quality} style={{ flex: 1 }} onChange={(e) => setOpts({ ...opts, quality: parseFloat(e.target.value) })} />
-              <span>{Math.round(opts.quality * 100)}</span>
-            </div>
-          )}
-          {isVideo && !stillOnly && videoTarget === 'video' && opts.videoFormat === 'gif' && (
-            <div className="row">
-              <label htmlFor="gif-fps">GIF fps</label>
-              <input id="gif-fps" type="number" min={1} max={30} value={opts.gifFps} style={{ width: 56 }} onChange={(e) => setOpts({ ...opts, gifFps: Math.max(1, Math.min(30, Number(e.target.value) || 10)) })} />
-              <label htmlFor="gif-width">width</label>
-              <input id="gif-width" type="number" min={64} max={1920} step={16} value={opts.gifWidth} style={{ width: 70 }} onChange={(e) => setOpts({ ...opts, gifWidth: Math.max(64, Math.min(1920, Number(e.target.value) || 480)) })} />
-            </div>
-          )}
-          <div className="row">
-            <button onClick={exportBatch} disabled={files.filter((f) => f.meta).length < 1 || !!job} data-testid="export-batch" title="Apply the pipeline to every loaded file and download a ZIP">⤓ Batch ZIP ({files.filter((f) => f.meta).length})</button>
-            <button onClick={exportText} disabled={!active?.meta || !hasEnabled(pipeline, 'ascii') || !!job} data-testid="export-txt">⤓ ASCII .txt</button>
-          </div>
-          <div className="hint">Name: {active ? outputName(active.name, presetName, pipeline.seed, '…') : '—'}</div>
+      <aside className={'inspector panel' + (sheetOpen ? ' open' : '')} aria-label="Parameters">
+        <button type="button" className="sheet-handle" onClick={() => setSheetOpen(!sheetOpen)}>
+          <span className="sheet-grabber" />
+          {sheetOpen ? 'Hide controls' : 'Edit & export'}
+        </button>
+        <div className="inspector-scroll">
+          {isVideo && active?.meta && <VideoPanel video={video} meta={active.meta} onChange={setVideo} />}
+          <EffectPanel pipeline={pipeline} isVideo={isVideo} onChange={setPipeline} cropEditing={cropEditing} onCropEdit={setCropEditing} />
+          <p className="credit">
+            Inspired by <a href="https://github.com/cebola4444/cybershot-cam" target="_blank" rel="noreferrer">CyberShot Cam</a>. Runs entirely in your browser.
+          </p>
         </div>
-        {isVideo && active?.meta && <VideoPanel video={video} meta={active.meta} onChange={setVideo} />}
-        <EffectPanel pipeline={pipeline} isVideo={isVideo} onChange={setPipeline} cropEditing={cropEditing} onCropEdit={setCropEditing} />
-        <div className="hint" style={{ padding: 10 }}>
-          Inspired by the <a href="https://github.com/cebola4444/cybershot-cam" target="_blank" rel="noreferrer" style={{ color: 'var(--accent)' }}>CyberShot Cam</a> project. Everything runs locally in your browser.
+        <div className="dock">
+          <div className="dock-title">
+            <span>Export</span>
+            <span className="dim mono filename" title={active ? outputName(active.name, presetName, pipeline.seed, '…') : ''}>{active ? outputName(active.name, presetName, pipeline.seed, '…') : 'No file selected'}</span>
+          </div>
+          {!isVideo ? (
+            <Segmented ariaLabel="Image format" testIdPrefix="fmt" value={opts.imageFormat} options={imgFormats} onChange={(v) => setOpts({ ...opts, imageFormat: v })} />
+          ) : (
+            <>
+              <Segmented ariaLabel="Video format" testIdPrefix="fmt" value={videoMain}
+                options={[
+                  { value: 'mp4', label: 'MP4', disabled: stillOnly },
+                  { value: 'webm', label: 'WebM', disabled: stillOnly },
+                  { value: 'gif', label: 'GIF', disabled: stillOnly },
+                  { value: 'still', label: stillOnly ? 'Still' : 'Frame' },
+                ]}
+                onChange={(v) => {
+                  if (v === 'still') setVideoTarget(videoTarget === 'video' ? 'png' : videoTarget);
+                  else { setVideoTarget('video'); setOpts({ ...opts, videoFormat: v as VideoExportFormat }); }
+                }} />
+              {videoMain === 'still' && (
+                <Segmented ariaLabel="Still format" testIdPrefix="still" size="sm" value={stillFmt}
+                  options={[{ value: 'png', label: 'PNG' }, { value: 'jpeg', label: 'JPEG' }, { value: 'webp', label: 'WebP' }]}
+                  onChange={(v) => setVideoTarget(v)} />
+              )}
+              {videoMain === 'gif' && (
+                <div className="row-gap">
+                  <span className="num-input"><input id="gif-fps" type="number" aria-label="GIF fps" min={1} max={30} value={opts.gifFps} onChange={(e) => setOpts({ ...opts, gifFps: Math.max(1, Math.min(30, Number(e.target.value) || 10)) })} /><span>fps</span></span>
+                  <span className="num-input"><input id="gif-width" type="number" aria-label="GIF width" min={64} max={1920} step={16} value={opts.gifWidth} onChange={(e) => setOpts({ ...opts, gifWidth: Math.max(64, Math.min(1920, Number(e.target.value) || 480)) })} /><span>px wide</span></span>
+                </div>
+              )}
+            </>
+          )}
+          {showQuality && (
+            <Slider id="quality" label="Quality" value={opts.quality} min={0.1} max={1} step={0.01} format={(v) => String(Math.round(v * 100))} onChange={(v) => setOpts({ ...opts, quality: v })} />
+          )}
+          <button type="button" className="btn btn-primary btn-block" data-testid="export" disabled={!active?.meta || !!job} onClick={exportCurrent}>
+            <Icon name="download" size={16} /> Export {exportLabel}
+            <span className="kbd-hint">⌘E</span>
+          </button>
+          <div className="dock-secondary">
+            <button type="button" className="btn btn-ghost btn-sm" onClick={exportBatch} disabled={readyCount < 1 || !!job} data-testid="export-batch" title="Apply the pipeline to every loaded file and download a ZIP">
+              <Icon name="archive" size={14} /> Batch ZIP ({readyCount})
+            </button>
+            <button type="button" className="btn btn-ghost btn-sm" onClick={exportText} disabled={!active?.meta || !hasEnabled(pipeline, 'ascii') || !!job} data-testid="export-txt" title="Export the ASCII effect as text">
+              <Icon name="text" size={14} /> ASCII .txt
+            </button>
+          </div>
         </div>
       </aside>
+      <div className="drop-overlay" aria-hidden="true"><div><Icon name="upload" size={28} /><span>Drop to add files</span></div></div>
     </div>
   );
 }

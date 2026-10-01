@@ -7,10 +7,9 @@ test.describe('image workflow', () => {
   test('each built-in preset renders and exports valid PNG / JPEG / WebP', async ({ page }) => {
     await page.goto('/');
     await upload(page, ['scene.png']);
-    const fmt = page.getByTestId('image-format');
     for (const preset of BUILTIN_PRESETS) {
       await afterRender(page, () => page.getByTestId('preset-select').selectOption(preset.name));
-      await expect(page.getByTestId('status')).toContainText(`preset: ${preset.name}`);
+      await expect(page.getByTestId('preset-select')).toHaveValue(preset.name);
       const slug = preset.name.toLowerCase().replace(/[^a-z0-9]+/g, '-');
       await page.screenshot({ path: `screenshots/preset-${slug}.png` });
       for (const [format, ext, sig, codec] of [
@@ -18,7 +17,7 @@ test.describe('image workflow', () => {
         ['jpeg', 'jpg', 'ffd8ff', 'mjpeg'],
         ['webp', 'webp', '52494646', 'webp'],
       ] as const) {
-        await fmt.selectOption(format);
+        await page.getByTestId(`fmt-${format}`).click();
         const { path, name } = await exportFile(page);
         expect(name).toBe(`scene_glitchlab_${slug}_${preset.pipeline.seed}.${ext}`);
         expect(statSync(path).size).toBeGreaterThan(1000);
@@ -39,7 +38,7 @@ test.describe('image workflow', () => {
     await page.goto('/');
     await upload(page, ['scene.jpg']);
     await afterRender(page, () => page.getByTestId('preset-select').selectOption('Heavy Glitch'));
-    await page.getByTestId('image-format').selectOption('jpeg-raw');
+    await page.getByTestId('fmt-jpeg-raw').click();
     const raw = await exportFile(page);
     expect(raw.name).toMatch(/_glitchlab_heavy-glitch_9001\.jpg$/);
     expect(magic(raw.path).startsWith('ffd8')).toBe(true);

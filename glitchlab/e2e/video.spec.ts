@@ -31,7 +31,7 @@ test('video: glitch + stacking → MP4 and GIF with the right duration / frame c
   // glitch preset + frame stacking (rolling lighten window)
   await afterRender(page, () => page.getByTestId('preset-select').selectOption('Heavy Glitch'));
   await afterRender(page, () => page.locator('input[data-param="stackOn"]').check());
-  await page.locator('#v-stack-mode').selectOption('lighten');
+  await page.getByTestId('v-stack-mode-lighten').click();
   await afterRender(page, () => page.locator('#v-stack-window').fill('4'));
   // scrub to the middle: preview follows
   await afterRender(page, () => page.getByTestId('scrubber').fill('1'));
@@ -39,7 +39,7 @@ test('video: glitch + stacking → MP4 and GIF with the right duration / frame c
   await page.screenshot({ path: 'screenshots/video-glitch-stack.png' });
 
   // MP4, while checking that the UI thread keeps painting
-  await page.getByTestId('video-format').selectOption('mp4');
+  await page.getByTestId('fmt-mp4').click();
   await startFrameMonitor(page);
   const mp4 = await exportFile(page);
   const stats = await frameStats(page);
@@ -55,7 +55,7 @@ test('video: glitch + stacking → MP4 and GIF with the right duration / frame c
   expect(stats.maxGap).toBeLessThan(500);
 
   // GIF at 10 fps, 160 px wide → 20 frames
-  await page.getByTestId('video-format').selectOption('gif');
+  await page.getByTestId('fmt-gif').click();
   await page.locator('#gif-fps').fill('10');
   await page.locator('#gif-width').fill('160');
   const gif = await exportFile(page);
@@ -67,7 +67,7 @@ test('video: glitch + stacking → MP4 and GIF with the right duration / frame c
   expect(g.frames).toBe(20);
 
   // WebM
-  await page.getByTestId('video-format').selectOption('webm');
+  await page.getByTestId('fmt-webm').click();
   const webm = await exportFile(page);
   const w = probe(webm.path, true);
   expect(w.codec).toBe('vp8');
@@ -79,13 +79,13 @@ test('video: trim, fps, speed and parameter animation', async ({ page }) => {
   await upload(page, ['testsrc.webm']);
   await afterRender(page, () => page.getByTestId('preset-select').selectOption('8-bit Arcade'));
   await afterRender(page, () => page.locator('#v-trim-start').fill('0.5'));
-  await afterRender(page, () => page.locator('#v-fps').selectOption('half'));
+  await afterRender(page, () => page.getByTestId('v-fps-half').click());
   await afterRender(page, () => page.locator('#v-speed').fill('0.5'));
   // animate the 8-bit block size from 8 to 1 across the clip
   await page.locator('[data-effect="eightbit"] .title').click();
   await page.getByRole('button', { name: 'Animate Block size' }).click();
   await afterRender(page, () => page.locator('#eightbit-block-to').fill('1'));
-  await page.getByTestId('video-format').selectOption('mp4');
+  await page.getByTestId('fmt-mp4').click();
   const { path } = await exportFile(page);
   const v = probe(path, true);
   // 1.5 s of source at half speed = 3 s, at 7.5 fps = 22 frames
@@ -98,9 +98,9 @@ test('video: long-exposure single still from the whole clip', async ({ page }) =
   await page.goto('/');
   await upload(page, ['testsrc.mov']);
   await afterRender(page, () => page.locator('input[data-param="stackOn"]').check());
-  await afterRender(page, () => page.locator('#v-stack-out').selectOption('still'));
-  await page.locator('#v-stack-mode').selectOption('average');
-  await page.getByTestId('video-format').selectOption('png');
+  await afterRender(page, () => page.getByTestId('v-stack-out-still').click());
+  await page.getByTestId('v-stack-mode-average').click();
+  await page.getByTestId('still-png').click();
   const { path, name } = await exportFile(page);
   expect(name).toMatch(/\.png$/);
   const s = probe(path);
@@ -112,7 +112,7 @@ test('video: cancelling an export stops it and the next export still works', asy
   await upload(page, ['testsrc.mp4']);
   await afterRender(page, () => page.getByTestId('preset-select').selectOption('Heavy Glitch'));
   await afterRender(page, () => page.locator('#v-speed').fill('0.25')); // 120 frames
-  await page.getByTestId('video-format').selectOption('mp4');
+  await page.getByTestId('fmt-mp4').click();
   await page.getByTestId('export').click();
   await expect(page.getByTestId('progress')).toBeVisible();
   await expect(page.getByTestId('progress')).toContainText(/frame \d+\/120/, { timeout: 60_000 });

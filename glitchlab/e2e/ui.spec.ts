@@ -10,12 +10,12 @@ test('keyboard: R rerolls the seed, Space toggles before/after, Ctrl+E exports',
   await page.locator('body').click({ position: { x: 5, y: 790 } });
   await afterRender(page, () => page.keyboard.press('r'));
   expect(await seed(page)).not.toBe(s0);
-  await expect(page.getByTestId('status')).toContainText('preset: CyberShot Green');
+  await expect(page.getByTestId('preset-select')).toHaveValue('CyberShot Green');
 
   await page.keyboard.press('Space');
-  await expect(page.locator('.tag.l', { hasText: 'BEFORE' })).toBeVisible();
+  await expect(page.locator('.tag.l', { hasText: 'Before' })).toBeVisible();
   await page.keyboard.press('Space');
-  await expect(page.locator('.tag.l', { hasText: 'BEFORE' })).toHaveCount(0);
+  await expect(page.locator('.tag.l', { hasText: 'Before' })).toHaveCount(0);
 
   const dl = page.waitForEvent('download');
   await page.keyboard.press('Control+e');
@@ -26,13 +26,13 @@ test('keyboard: R rerolls the seed, Space toggles before/after, Ctrl+E exports',
 test('before/after split view, effect reordering and crop editing', async ({ page }) => {
   await page.goto('/');
   await upload(page, ['scene.png']);
-  await page.getByRole('button', { name: '⇆ split' }).click();
+  await page.getByRole('button', { name: 'Split view' }).click();
   await expect(page.getByRole('slider', { name: 'Before/after split' })).toBeVisible();
   await page.screenshot({ path: 'screenshots/split.png' });
-  await page.getByRole('button', { name: '⇆ split' }).click();
+  await page.getByRole('button', { name: 'Split view' }).click();
 
   // reorder: move Palette above Databend
-  const titles = () => page.locator('.section[data-effect] .title').allInnerTexts();
+  const titles = () => page.locator('.card[data-effect] .name').allInnerTexts();
   const before = await titles();
   const iPal = before.findIndex((t) => t.includes('Palette'));
   await afterRender(page, () => page.getByRole('button', { name: 'Move Palette / Viewfinder up' }).click());
@@ -55,7 +55,7 @@ test('before/after split view, effect reordering and crop editing', async ({ pag
   });
   await page.screenshot({ path: 'screenshots/crop.png' });
   await afterRender(page, () => page.getByRole('button', { name: /Done editing crop/ }).click());
-  await page.getByTestId('image-format').selectOption('png');
+  await page.getByTestId('fmt-png').click();
   const { path } = await exportFile(page);
   const info = probe(path);
   expect(info.width).toBe(640);
@@ -70,7 +70,7 @@ test('12 MP image: full pipeline export < 10 s while the UI stays responsive', a
     const box = page.locator(`[data-enable="${t}"]`);
     if (!(await box.isChecked())) await afterRender(page, () => box.check());
   }
-  await page.getByTestId('image-format').selectOption('png');
+  await page.getByTestId('fmt-png').click();
   await page.evaluate(() => {
     const w = window as unknown as { __maxGap: number };
     w.__maxGap = 0;
@@ -96,7 +96,7 @@ test('mobile width: parameter panel becomes a bottom sheet', async ({ page }) =>
   await page.goto('/');
   await upload(page, ['scene.png']);
   const panel = page.locator('aside.panel');
-  const handle = page.getByRole('button', { name: /effects & export/ });
+  const handle = page.getByRole('button', { name: /Edit & export/ });
   await expect(handle).toBeVisible();
   const closed = (await panel.boundingBox())!;
   expect(closed.height).toBeLessThan(80);

@@ -251,3 +251,45 @@ decisions are appended to the relevant section.
     arguments reach the tool: without it, `npm run dev -- --port 3000` at the
     root had npm swallow `--port` as its own config (found in the clean-clone
     check).
+
+## Redesign (v2 UI)
+
+58. **From "retro terminal" to "darkroom instrument".** User feedback was that
+    the first UI felt janky. The redesign keeps the camera nod as a single
+    phosphor-green accent (switches, active icons, primary button, slider
+    fills) on calm neutral surfaces with three elevation levels, instead of
+    green-on-black everywhere. Monospace is reserved for numbers, seed,
+    timecode and file names; UI text is Inter.
+59. **Fonts are bundled** (`@fontsource-variable/inter`, `@fontsource/jetbrains-mono`)
+    rather than loaded from Google Fonts, so the app makes no third-party
+    requests and works offline — consistent with "files never leave the
+    browser".
+60. **SVG icon set** (`src/ui/Icons.tsx`, drawn for GlitchLab) replaces unicode
+    glyphs (⟳ ⇆ ◐ ⤓), which render inconsistently across fonts.
+61. **Custom primitives:** filled-track sliders with label + tabular value on
+    one line, switches for every on/off, segmented controls for any select
+    with ≤ 4 short options (native styled `<select>` otherwise, for
+    accessibility and long lists).
+62. **Effect cards** show an icon, a live one-line summary of the settings
+    (so the pipeline is readable without expanding anything), a switch and a
+    chevron. Reorder arrows and the drag grip appear on hover so they don't
+    clutter the list. Dependent controls (e.g. DQT sliders under the DQT
+    switch) are indented with a guide line.
+63. **Stage chrome floats over the image:** file/size/timing chip (top-left),
+    toasts (top-right, auto-dismiss), render spinner (bottom-right, delayed
+    150 ms so fast renders don't flicker), and a floating view toolbar
+    (Compare / Original / Reroll) at the bottom. Export progress is a floating
+    card above the toolbar. The video scrubber became a timeline bar with a
+    timecode.
+64. **Export lives in a sticky dock** at the bottom of the inspector (format
+    segmented control → big "Export <format>" button → secondary Batch / .txt),
+    so it is always one click away regardless of scroll. Preset save / delete /
+    JSON moved into a "⋯" popover next to the preset picker.
+65. **Empty state** is an explicit drop card with a primary "Choose files"
+    button, supported formats, the privacy promise and shortcuts; dragging
+    files anywhere shows a full-window drop overlay.
+66. **Mobile:** the inspector is a rounded bottom sheet with a grabber; the
+    export dock stays inside it; toolbar buttons collapse to icons.
+67. e2e selectors moved from `<select>`s to the segmented controls'
+    `data-testid`s (`fmt-png`, `v-stack-mode-lighten`, …); a `screens.spec.ts`
+    captures the design screenshots used in the README.

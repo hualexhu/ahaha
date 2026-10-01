@@ -8,10 +8,11 @@ interface Props {
   split: number;
   onSplit: (v: number) => void;
   showBefore: boolean;
-  busy: boolean;
   /** Crop editing: params of the geometry effect + full-res size of the frame shown. */
   crop: { params: Params; onChange: (p: Partial<Params>) => void } | null;
   empty: ReactNode;
+  /** Floating chrome drawn over the stage (toolbar, chips). */
+  overlay?: ReactNode;
 }
 
 function BitmapCanvas({ bmp, className }: { bmp: ImageBitmap | null; className?: string }): ReactNode {
@@ -40,11 +41,11 @@ function useFitScale(viewport: React.RefObject<HTMLDivElement | null>, w: number
     return () => ro.disconnect();
   }, [viewport]);
   if (!w || !h || !box.w) return 1;
-  const fit = Math.min((box.w - 24) / w, (box.h - 24) / h);
+  const fit = Math.min((box.w - 48) / w, (box.h - 132) / h);
   return fit >= 1 ? Math.max(1, Math.floor(fit)) : Math.max(0.05, fit);
 }
 
-export function Preview({ before, after, split, onSplit, showBefore, busy, crop, empty }: Props): ReactNode {
+export function Preview({ before, after, split, onSplit, showBefore, crop, empty, overlay }: Props): ReactNode {
   const frameRef = useRef<HTMLDivElement>(null);
   const viewportRef = useRef<HTMLDivElement>(null);
   const scale = useFitScale(viewportRef, after?.width ?? 0, after?.height ?? 0);
@@ -66,7 +67,7 @@ export function Preview({ before, after, split, onSplit, showBefore, busy, crop,
   };
 
   if (!after) {
-    return <div className="viewport" ref={viewportRef}>{empty}{busy && <span className="busy-dot">▮ rendering…</span>}</div>;
+    return <div className="viewport" ref={viewportRef}>{empty}{overlay}</div>;
   }
 
   // When editing the crop, show the full (uncropped) frame with a box overlay.
@@ -142,14 +143,14 @@ export function Preview({ before, after, split, onSplit, showBefore, busy, crop,
                 if (e.key === 'ArrowLeft') onSplit(Math.max(0, split - 0.05));
                 if (e.key === 'ArrowRight') onSplit(Math.min(1, split + 0.05));
               }} />
-            <span className="tag l">BEFORE</span>
-            <span className="tag r">AFTER</span>
+            <span className="tag l">Before</span>
+            <span className="tag r">After</span>
           </>
         )}
-        {showBefore && <span className="tag l">BEFORE</span>}
+        {showBefore && <span className="tag l">Before</span>}
         {cropBox}
       </div>
-      {busy && <span className="busy-dot">▮ rendering…</span>}
+      {overlay}
     </div>
   );
 }

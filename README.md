@@ -20,9 +20,11 @@ the browser. No code from that project is used (it has no licence).
 |---|
 | ![The six built-in presets](glitchlab/docs/screenshots/presets.png) |
 
-| Before/after split | Video: glitch + light-trail stacking | Mobile (bottom sheet) |
+| Before/after compare | Video: glitch + light-trail stacking | Mobile (bottom sheet) |
 |---|---|---|
-| ![split view](glitchlab/docs/screenshots/ui-split.png) | ![video](glitchlab/docs/screenshots/ui-video.png) | ![mobile](glitchlab/docs/screenshots/mobile.png) |
+| ![compare view](glitchlab/docs/screenshots/ui-split.png) | ![video](glitchlab/docs/screenshots/ui-video.png) | ![mobile](glitchlab/docs/screenshots/mobile.png) |
+
+![Empty state](glitchlab/docs/screenshots/empty.png)
 
 ---
 
@@ -57,20 +59,22 @@ Netlify, S3 etc. are fine.
 
 ## Using it
 
-1. **Load files**: drag & drop anywhere, or click **⊕** in the file strip.
+1. **Load files**: drag & drop anywhere, or click **Choose files** / the **+** tile in the left rail.
    Several files at once; click a thumbnail to make it active.
    Images: JPEG, PNG, WebP. Videos: MP4 (H.264), WebM, MOV.
-2. **Pick a preset** in the top bar, or enable effects in the right-hand
-   panel. Every effect has an on/off checkbox, a collapsible section, and ↑/↓
-   buttons (or drag the ⋮⋮ grip) to reorder the pipeline. **Order matters**:
-   effects run top to bottom.
+2. **Pick a preset** in the top bar, or switch effects on in the right-hand
+   inspector. Each effect is a card with a switch, a one-line summary of its
+   settings, and its controls when expanded. Hover a card to reveal the reorder
+   arrows, or drag its grip. **Order matters**: effects run top to bottom.
 3. **Preview**: a reduced-resolution render (long edge ≤ 720 px) updates about
-   0.1 s after you stop moving a slider. **⇆ split** shows a draggable
-   before/after divider; **◐ before** (or <kbd>Space</kbd>) shows the original.
+   0.1 s after you stop moving a slider. The floating toolbar under the image
+   has **Compare** (draggable before/after divider), **Original** (or
+   <kbd>Space</kbd>) and **Reroll**.
    For videos, the scrubber previews any frame with the current settings.
-4. **Export**: pick a format and hit **⤓ Export** (<kbd>Ctrl</kbd>/<kbd>⌘</kbd>+<kbd>E</kbd>).
+4. **Export**: pick a format in the export dock at the bottom of the
+   inspector and hit **Export** (<kbd>Ctrl</kbd>/<kbd>⌘</kbd>+<kbd>E</kbd>).
    Exports are rendered at full resolution in a background worker. The
-   progress bar shows an ETA and a **✕ Cancel** button.
+   progress card shows an ETA and a **Cancel** button.
 
 ### Keyboard
 
@@ -161,7 +165,7 @@ Maps luminance to a handful of tones, like the camera's small TFT viewfinder.
 | Colour | mono · amber · green · original colour | Glyph colour (tinted modes are brightness-modulated). |
 | Background | colour | Cell background. |
 
-The result is an image. **⤓ ASCII .txt** also exports the characters as text
+The result is an image. **ASCII .txt** in the export dock also exports the characters as text
 (full resolution, one line per row of cells).
 
 ### 6. Colour
@@ -178,7 +182,7 @@ The result is an image. **⤓ ASCII .txt** also exports the characters as text
 
 | Parameter | Values | What it does |
 |---|---|---|
-| Crop | original · free · 1:1 · 4:5 · 3:2 · 16:9 · 9:16 | Aspect ratio. Click **⬚ Edit crop box on preview** to drag the box (drag inside to move, drag the corner to resize). |
+| Crop | original · free · 1:1 · 4:5 · 3:2 · 16:9 · 9:16 | Aspect ratio. Click **Edit crop box on preview** to drag the box (drag inside to move, drag the corner to resize). |
 | Crop X/Y/width/height | 0–1 | The crop box, as fractions of the frame (also set by dragging). |
 | Rotate | −90° · 0° · +90° · 180° | |
 | Flip horizontal / vertical | toggles | |
@@ -209,7 +213,7 @@ sets the motion blocks, **Motion strength** scales the vectors, and **Glitch
 ramp start/end** blends from the real frame to the moshed one across each hold,
 so the image melts further the longer a keyframe is held.
 
-**Parameter animation:** with a video loaded, every slider gets a **◆** button.
+**Parameter animation:** with a video loaded, every slider gets a **◆** (diamond) button.
 Turn it on and a second slider sets the *end* value; the parameter moves
 linearly from its value at the start of the clip to the end value at the last
 frame (e.g. databend intensity 0 → 1, block size 32 → 1, hue −180 → 180).
@@ -223,11 +227,10 @@ glitch), **Heavy Glitch** (every databend corruption), **Light Trails**
 (lighten stacking on video, highlight pixel-sort streaks on stills),
 **Terminal ASCII**, **8-bit Arcade** and **Noir Sort**.
 
-Type a name and press **Save** to store the current pipeline, video settings
-and seed in `localStorage`. **Delete** removes the selected saved preset.
-**JSON ↓** downloads your presets; **JSON ↑** imports a file (validated,
-unknown fields are dropped). Changing any parameter switches the preset
-label to *custom*.
+The **⋯** menu next to the preset picker saves the current pipeline, video
+settings and seed under a name (`localStorage`), deletes the selected saved
+preset, and imports / exports presets as JSON (validated, unknown fields are
+dropped). Changing any parameter switches the preset to *Custom*.
 
 ## Outputs
 
@@ -235,7 +238,7 @@ label to *custom*.
 |---|---|
 | Image | PNG · JPEG (quality slider) · WebP (quality slider) · **Glitched JPEG (raw bytes)**: the corrupted JPEG exactly as produced by the databend stage (effects after it in the pipeline are not part of those bytes) |
 | Video | MP4 (H.264) · WebM (VP8) · animated GIF (palette-optimised; fps + width controls) · PNG/JPEG/WebP of the current frame, or of the stacked still |
-| Batch | **⤓ Batch ZIP** applies the current pipeline to every loaded file (images in the image format, videos in the video format) |
+| Batch | **Batch ZIP** applies the current pipeline to every loaded file (images in the image format, videos in the video format) |
 | ASCII | `.txt` |
 
 File names: `<original>_glitchlab_<preset-or-custom>_<seed>.<ext>`, e.g.

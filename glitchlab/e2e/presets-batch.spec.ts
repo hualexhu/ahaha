@@ -14,9 +14,10 @@ test('presets: save, reload from localStorage, delete, JSON export + import', as
   await afterRender(page, () => select.selectOption('8-bit Arcade'));
   await page.locator('[data-effect="eightbit"] .title').click();
   await afterRender(page, () => page.locator('[data-effect="eightbit"] input[data-param="block"]').fill('16'));
-  await expect(page.getByTestId('status')).toContainText('preset: custom');
+  await expect(select).toHaveValue('');
 
   // save
+  await page.getByRole('button', { name: 'Preset options' }).click();
   await page.getByLabel('New preset name').fill('Chunky');
   await page.getByRole('button', { name: 'Save', exact: true }).click();
   await expect(select).toHaveValue('Chunky');
@@ -31,13 +32,15 @@ test('presets: save, reload from localStorage, delete, JSON export + import', as
 
   // export JSON
   const dl = page.waitForEvent('download');
-  await page.getByRole('button', { name: 'JSON ↓' }).click();
+  await page.getByRole('button', { name: 'Preset options' }).click();
+  await page.getByRole('button', { name: 'Export JSON' }).click();
   const presetFile = await (await dl).path();
   const parsed = JSON.parse(readFileSync(presetFile, 'utf8'));
   expect(parsed.presets.map((p: { name: string }) => p.name)).toContain('Chunky');
 
   // delete
-  await page.getByRole('button', { name: 'Delete' }).click();
+  await page.getByRole('button', { name: 'Preset options' }).click();
+  await page.getByRole('button', { name: /^Delete/ }).click();
   await expect(page.locator('option', { hasText: 'Chunky' })).toHaveCount(0);
 
   // import (renamed copy)
@@ -47,7 +50,7 @@ test('presets: save, reload from localStorage, delete, JSON export + import', as
   await page.getByTestId('preset-import').setInputFiles(f);
   await expect(page.getByTestId('message')).toContainText('Imported 1 preset');
   await afterRender(page, () => select.selectOption('Imported Chunky'));
-  await expect(page.getByTestId('status')).toContainText('preset: Imported Chunky');
+  await expect(select).toHaveValue('Imported Chunky');
 });
 
 test('batch: applies the pipeline to 3 files and downloads a ZIP', async ({ page }) => {
@@ -56,7 +59,7 @@ test('batch: applies the pipeline to 3 files and downloads a ZIP', async ({ page
   await expect(page.getByTestId('thumb')).toHaveCount(3);
   await expect(page.getByTestId('export-batch')).toContainText('(3)');
   await afterRender(page, () => page.getByTestId('preset-select').selectOption('Noir Sort'));
-  await page.getByTestId('image-format').selectOption('png');
+  await page.getByTestId('fmt-png').click();
   const { path, name } = await exportFile(page, 'export-batch');
   expect(name).toBe('glitchlab_batch_noir-sort_1947.zip');
   const entries = unzipSync(new Uint8Array(readFileSync(path)));
