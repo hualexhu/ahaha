@@ -1,108 +1,208 @@
 /// <reference lib="webworker" />
 /**
- * Thin wrapper around the single-threaded ffmpeg.wasm core, loaded directly
- * inside our processing worker (no nested worker, no SharedArrayBuffer, so
- * no COOP/COEP headers are needed).
+ * ffmpeg.wasm (single-threaded @ffmpeg/core) loaded directly in our worker.
+ *
+ * Lessons from real videos: one long-lived ffmpeg instance degrades after
+ * dozens of runs (an x264 run hung after ~100 runs in one instance and
+ * finished in 2 s in a fresh one; users saw "memory access out of bounds").
+ * So the wasm module is compiled once per worker, and callers create cheap
+ * fresh *instances* (tens of ms) per job. Source files are mounted with
+ * WORKERFS, which reads the user's File in place instead of copying it into
+ * memory.
  */
 import coreURL from '@ffmpeg/core?url';
 import wasmURL from '@ffmpeg/core/wasm?url';
-import type { VideoMeta } from '../core/video';
 
+interface FSNode {
+  contents?: unknown;
+}
+export interface EmFS {
+  writeFile(path: string, data: Uint8Array): void;
+  readFile(path: string): Uint8Array;
+  unlink(path: string): void;
+  stat(path: string): { size: number };
+  mkdir(path: string): void;
+  mount(type: unknown, opts: object, mountpoint: string): void;
+  unmount(mountpoint: string): void;
+  filesystems: Record<string, unknown>;
+  makedev(major: number, minor: number): number;
+  registerDevice(dev: number, ops: DeviceOps): void;
+  mkdev(path: string, dev: number): FSNode;
+  open(path: string, flags: string): object;
+  write(stream: object, buffer: Uint8Array, offset: number, length: number, position?: number, canOwn?: boolean): number;
+  close(stream: object): void;
+}
+export interface DeviceOps {
+  open(stream: object): void;
+  close(stream: object): void;
+  read(stream: object, buffer: Uint8Array, offset: number, length: number, position: number): number;
+  write(stream: object, buffer: Uint8Array, offset: number, length: number, position?: number): number;
+}
 interface FFmpegCore {
-  FS: {
-    writeFile(path: string, data: Uint8Array): void;
-    readFile(path: string): Uint8Array;
-    unlink(path: string): void;
-    readdir(path: string): string[];
-    stat(path: string): { size: number };
-  };
+  FS: EmFS;
+  HEAPU8: Uint8Array;
   exec(...args: string[]): number;
+  ffprobe(...args: string[]): number;
   ret: number;
   reset(): void;
   setLogger(fn: (e: { type: string; message: string }) => void): void;
-  setProgress(fn: (e: { progress: number; time: number }) => void): void;
   setTimeout(ms: number): void;
 }
+type CoreFactory = (opts: object) => Promise<FFmpegCore>;
 
-let corePromise: Promise<FFmpegCore> | null = null;
-let logSink: ((line: string) => void) | null = null;
+interface Compiled {
+  module: WebAssembly.Module;
+  factory: CoreFactory;
+  core: string;
+  wasm: string;
+}
+let compiled: Promise<Compiled> | null = null;
 
-export function loadFFmpeg(): Promise<FFmpegCore> {
-  if (!corePromise) {
-    corePromise = (async () => {
+function compileOnce(): Promise<Compiled> {
+  if (!compiled) {
+    compiled = (async () => {
       const abs = (u: string): string => new URL(u, self.location.href).href;
       const core = abs(coreURL);
-      const mod = (await import(/* @vite-ignore */ core)) as { default: (o: object) => Promise<FFmpegCore> };
-      const ff = await mod.default({
-        mainScriptUrlOrBlob: `${core}#${btoa(JSON.stringify({ wasmURL: abs(wasmURL), workerURL: '' }))}`,
-      });
-      ff.setLogger((e) => logSink?.(e.message));
-      return ff;
+      const wasm = abs(wasmURL);
+      const factory = ((await import(/* @vite-ignore */ core)) as { default: CoreFactory }).default;
+      let module: WebAssembly.Module;
+      try {
+        module = await WebAssembly.compileStreaming(fetch(wasm));
+      } catch {
+        // hosts that don't serve application/wasm
+        module = await WebAssembly.compile(await (await fetch(wasm)).arrayBuffer());
+      }
+      return { module, factory, core, wasm };
     })();
-    corePromise.catch(() => { corePromise = null; });
+    compiled.catch(() => {
+      compiled = null;
+    });
   }
-  return corePromise;
+  return compiled;
 }
 
-/** Run ffmpeg with the given args; returns exit code and the captured log. */
-export async function run(args: string[]): Promise<{ code: number; log: string[] }> {
-  const ff = await loadFFmpeg();
-  const log: string[] = [];
-  logSink = (l) => log.push(l);
-  try {
-    ff.setTimeout(-1);
-    ff.exec('-nostdin', '-hide_banner', '-y', ...args);
-    const code = ff.ret;
-    ff.reset();
-    return { code, log };
-  } finally {
-    logSink = null;
+/** Errors that mean the wasm instance itself is broken (as opposed to ffmpeg reporting a problem). */
+export function isEngineCrash(e: unknown): boolean {
+  const msg = e instanceof Error ? `${e.name} ${e.message}` : String(e);
+  return /memory access out of bounds|out of bounds memory|RuntimeError|unreachable|out of memory|Maximum call stack|index out of bounds/i.test(msg);
+}
+
+export class FFInstance {
+  private sink: ((line: string) => void) | null = null;
+  private mounts = new Map<string, string>();
+  private runs = 0;
+  private constructor(private readonly ff: FFmpegCore) {
+    ff.setLogger((e) => this.sink?.(e.message));
   }
-}
 
-export async function writeFile(path: string, data: Uint8Array): Promise<void> {
-  (await loadFFmpeg()).FS.writeFile(path, data);
-}
-
-export async function readFile(path: string): Promise<Uint8Array> {
-  return (await loadFFmpeg()).FS.readFile(path);
-}
-
-export async function removeFile(path: string): Promise<void> {
-  try {
-    (await loadFFmpeg()).FS.unlink(path);
-  } catch {
-    /* already gone */
+  static async create(): Promise<FFInstance> {
+    const { module, factory, core, wasm } = await compileOnce();
+    const ff = await factory({
+      mainScriptUrlOrBlob: `${core}#${btoa(JSON.stringify({ wasmURL: wasm, workerURL: '' }))}`,
+      instantiateWasm: (imports: WebAssembly.Imports, receive: (i: WebAssembly.Instance, m: WebAssembly.Module) => void) => {
+        void WebAssembly.instantiate(module, imports).then((instance) => receive(instance, module));
+        return {};
+      },
+    });
+    return new FFInstance(ff);
   }
-}
 
-export async function fileExists(path: string): Promise<boolean> {
-  try {
-    (await loadFFmpeg()).FS.stat(path);
-    return true;
-  } catch {
-    return false;
+  get fs(): EmFS {
+    return this.ff.FS;
   }
-}
 
-/** Parse duration / size / fps / rotation from `ffmpeg -i` output. */
-export function parseProbe(log: string[]): VideoMeta | null {
-  const text = log.join('\n');
-  const dur = /Duration:\s*(\d+):(\d+):(\d+(?:\.\d+)?)/.exec(text);
-  const vid = /Stream #\d+:\d+[^\n]*Video:[^\n]*?(\d{2,5})x(\d{2,5})[^\n]*/.exec(text);
-  if (!vid) return null;
-  let width = parseInt(vid[1], 10);
-  let height = parseInt(vid[2], 10);
-  const line = vid[0];
-  const fpsM = /([\d.]+)\s*fps/.exec(line) ?? /([\d.]+)\s*tbr/.exec(line);
-  const fps = fpsM ? parseFloat(fpsM[1]) : 30;
-  const rot = /rotate\s*:\s*(-?\d+)/.exec(text) ?? /rotation of (-?[\d.]+) degrees/.exec(text);
-  if (rot && Math.abs(Math.round(parseFloat(rot[1]))) % 180 === 90) [width, height] = [height, width];
-  const duration = dur ? parseInt(dur[1], 10) * 3600 + parseInt(dur[2], 10) * 60 + parseFloat(dur[3]) : 0;
-  return { width, height, duration, fps: fps > 0 && fps < 1000 ? fps : 30 };
-}
+  /** Number of ffmpeg runs made on this instance. */
+  get runCount(): number {
+    return this.runs;
+  }
 
-export async function probe(path: string): Promise<VideoMeta | null> {
-  const { log } = await run(['-i', path]);
-  return parseProbe(log);
+  heapBytes(): number {
+    return this.ff.HEAPU8.length;
+  }
+
+  /** Run the ffmpeg CLI synchronously. Throws only when the engine itself crashes. */
+  run(args: string[]): { code: number; log: string[] } {
+    const log: string[] = [];
+    this.sink = (l) => log.push(l);
+    this.runs++;
+    try {
+      this.ff.setTimeout(-1);
+      this.ff.exec('-nostdin', '-hide_banner', '-y', ...args);
+      const code = this.ff.ret;
+      this.ff.reset();
+      return { code, log };
+    } finally {
+      this.sink = null;
+    }
+  }
+
+  /** Run ffprobe synchronously; returns stdout+stderr lines. */
+  probe(args: string[]): { code: number; log: string[] } {
+    const log: string[] = [];
+    this.sink = (l) => log.push(l);
+    this.runs++;
+    try {
+      this.ff.setTimeout(-1);
+      this.ff.ffprobe(...args);
+      const code = this.ff.ret;
+      this.ff.reset();
+      return { code, log };
+    } finally {
+      this.sink = null;
+    }
+  }
+
+  /** Mount a Blob read-only (no copy) and return its path. */
+  mount(key: string, blob: Blob, ext: string): string {
+    const existing = this.mounts.get(key);
+    if (existing) return existing;
+    const dir = `/in_${key.replace(/[^\w-]/g, '_')}`;
+    const name = `source.${ext}`;
+    this.fs.mkdir(dir);
+    this.fs.mount(this.fs.filesystems.WORKERFS, { blobs: [{ name, data: blob }] }, dir);
+    const path = `${dir}/${name}`;
+    this.mounts.set(key, path);
+    return path;
+  }
+
+  unmount(key: string): void {
+    const path = this.mounts.get(key);
+    if (!path) return;
+    try {
+      this.fs.unmount(path.slice(0, path.lastIndexOf('/')));
+    } catch {
+      /* already gone */
+    }
+    this.mounts.delete(key);
+  }
+
+  /** Write a file, letting MEMFS take ownership of the buffer instead of copying it. */
+  writeOwned(path: string, data: Uint8Array): void {
+    const stream = this.fs.open(path, 'w');
+    this.fs.write(stream, data, 0, data.length, 0, true);
+    this.fs.close(stream);
+  }
+
+  readAndRemove(path: string): Uint8Array {
+    const data = this.fs.readFile(path);
+    this.remove(path);
+    return data;
+  }
+
+  remove(path: string): void {
+    try {
+      this.fs.unlink(path);
+    } catch {
+      /* already gone */
+    }
+  }
+
+  exists(path: string): boolean {
+    try {
+      this.fs.stat(path);
+      return true;
+    } catch {
+      return false;
+    }
+  }
 }

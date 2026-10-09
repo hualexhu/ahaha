@@ -11,10 +11,10 @@ import { hasEnabled, runPipeline, type Pipeline, type RunOptions } from '../core
 import { normalizeVideo, planVideo, type VideoMeta, type VideoPlan, type VideoSettings } from '../core/video';
 import { RollingStack, StillStack } from '../effects/stack';
 import { num } from '../effects/types';
-import { probe, writeFile, removeFile, fileExists } from './ffmpeg';
+import { FFInstance, isEngineCrash } from './ffmpeg';
 import { canvasGlyphs, decodeImageFile, encodeImage, imgToBitmap, type ImageFormat } from './imageio';
 import type { ExportOptions, ExportResult, FileKind, FileMeta, PreviewResult, Progress, Request, Response } from './protocol';
-import { CHUNK_BYTES, decodeFrames, encodeSegment, evenize, finishVideo } from './video';
+import { decodeFrames, evenize, finishVideo, probeVideo, SegmentEncoder, streamFrames } from './video';
 
 declare const self: DedicatedWorkerGlobalScope;
 
@@ -29,8 +29,8 @@ interface OpenFile {
   videoMeta?: VideoMeta;
   /** Preview-size source for stills. */
   preview?: Img;
-  /** MEMFS path of the video. */
-  path?: string;
+  /** The video file (mounted into the preview engine on demand, never copied). */
+  blob?: Blob;
 }
 const files = new Map<string, OpenFile>();
 let frameCache: { key: string; frames: Img[] } | null = null;
@@ -45,15 +45,58 @@ function extOf(file: Blob): string {
   return 'mp4';
 }
 
-async function ensureVideoInFs(path: string, file: Blob): Promise<void> {
-  if (!(await fileExists(path))) await writeFile(path, new Uint8Array(await file.arrayBuffer()));
-}
+/**
+ * The preview worker keeps one ffmpeg instance for responsiveness, but
+ * replaces it after a crash (and retries once) or after 40 runs, before it
+ * can degrade. Videos are mounted into it with WORKERFS (no copy).
+ */
+class PreviewEngine {
+  private inst: FFInstance | null = null;
+  private creating: Promise<FFInstance> | null = null;
 
-async function openVideo(path: string, file: Blob): Promise<VideoMeta> {
-  await ensureVideoInFs(path, file);
-  const meta = await probe(path);
-  if (!meta) throw new Error('Could not read this video (unsupported codec or container).');
-  return meta;
+  private async get(): Promise<FFInstance> {
+    if (this.inst && this.inst.runCount < 40) return this.inst;
+    this.inst = null;
+    this.creating ??= FFInstance.create().finally(() => { this.creating = null; });
+    this.inst = await this.creating;
+    return this.inst;
+  }
+
+  /** Run `fn` with the engine and the mounted video; on an engine crash, start a fresh engine and try once more. */
+  async use<T>(fileId: string, fn: (ff: FFInstance, path: string) => T): Promise<T> {
+    const f = files.get(fileId);
+    if (!f?.blob) throw new Error('file not open');
+    for (let attempt = 1; ; attempt++) {
+      const ff = await this.get();
+      try {
+        return fn(ff, ff.mount(fileId, f.blob, extOf(f.blob)));
+      } catch (e) {
+        this.inst = null; // never reuse an instance that threw
+        if (!isEngineCrash(e) || attempt >= 2) throw e;
+      }
+    }
+  }
+
+  unmount(fileId: string): void {
+    this.inst?.unmount(fileId);
+  }
+}
+const engine = new PreviewEngine();
+
+/** Run an export step with fresh engines; if the engine crashes, retry once with new ones. */
+async function withFreshEngines<T>(fn: () => Promise<T>, onRetry?: () => void): Promise<T> {
+  try {
+    return await fn();
+  } catch (e) {
+    if (!isEngineCrash(e)) throw e;
+    onRetry?.();
+    try {
+      return await fn();
+    } catch (e2) {
+      if (!isEngineCrash(e2)) throw e2;
+      throw new Error(`The video engine ran out of memory on this clip (${errMsg(e2)}). Try a shorter trim, Output scale 1/2 in Geometry, or a GIF.`, { cause: e2 });
+    }
+  }
 }
 
 // ---------------------------------------------------------------- open
@@ -65,15 +108,24 @@ async function handleOpen(fileId: string, file: Blob, kind: FileKind): Promise<{
     files.set(fileId, { kind, meta, preview });
     return { meta, thumb: imgToBitmap(resizeArea(preview, t.width, t.height)) };
   }
-  const path = `in_${fileId}.${extOf(file)}`;
-  const vm = await openVideo(path, file);
-  const plan = planVideo(vm, normalizeVideo(undefined));
-  const meta: FileMeta = { kind, width: vm.width, height: vm.height, duration: vm.duration, fps: vm.fps, warnings: plan.warnings };
-  files.set(fileId, { kind, meta, videoMeta: vm, path });
-  const t = fitLongEdge(plan.width, plan.height, 160);
-  const [first] = await decodeFrames(path, { start: 0, count: 1, fps: vm.fps, speed: 1, width: even(t.width), height: even(t.height) }, 'thumb');
-  const thumbImg = first ?? { width: 2, height: 2, data: new Uint8ClampedArray(16) };
-  return { meta, thumb: imgToBitmap(thumbImg) };
+  files.set(fileId, { kind, meta: { kind, width: 0, height: 0, warnings: [] }, blob: file });
+  try {
+    const { vm, first } = await engine.use(fileId, (ff, path) => {
+      const vm = probeVideo(ff, path);
+      const plan = planVideo(vm, normalizeVideo(undefined));
+      const t = fitLongEdge(plan.width, plan.height, 160);
+      const [first] = decodeFrames(ff, path, { start: 0, count: 1, fps: vm.fps, speed: 1, width: even(t.width), height: even(t.height) });
+      return { vm, first };
+    });
+    const plan = planVideo(vm, normalizeVideo(undefined));
+    const meta: FileMeta = { kind, width: vm.width, height: vm.height, duration: vm.duration, fps: vm.fps, warnings: plan.warnings };
+    files.set(fileId, { kind, meta, videoMeta: vm, blob: file });
+    const thumbImg = first ?? { width: 2, height: 2, data: new Uint8ClampedArray(16) };
+    return { meta, thumb: imgToBitmap(thumbImg) };
+  } catch (e) {
+    files.delete(fileId);
+    throw e;
+  }
 }
 
 const even = (v: number): number => Math.max(2, Math.round(v / 2) * 2);
@@ -95,23 +147,16 @@ function historyNeeded(pipeline: Pipeline, v: VideoSettings, k: number): { stack
   return { stack: Math.min(stack, 29), mosh: Math.min(mosh, 40) };
 }
 
-async function stillStackFrames(path: string, plan: VideoPlan, v: VideoSettings, width: number, height: number, maxFrames: number, onFrame?: (i: number, n: number) => void): Promise<Img | null> {
+/** Long exposure over the whole (trimmed) clip in one sequential decode; `maxFrames` samples evenly. */
+function stillStack(ff: FFInstance, path: string, plan: VideoPlan, v: VideoSettings, width: number, height: number, maxFrames: number, onFrame?: (i: number, n: number) => void): Img | null {
   const stack = new StillStack(v.stackMode);
-  const span = plan.end - plan.start;
   const n = Math.min(maxFrames, plan.frames);
-  // sample n frames evenly over the (speed-adjusted) range
-  const fps = Math.max(0.01, n / (span / v.speed));
-  const perChunk = Math.max(1, Math.floor(CHUNK_BYTES / (width * height * 4)));
-  let done = 0;
-  while (done < n) {
-    const count = Math.min(perChunk, n - done);
-    const frames = await decodeFrames(path, { start: plan.start + (done * v.speed) / fps, count, fps, speed: v.speed, width, height }, 'still');
-    if (!frames.length) break;
-    for (const f of frames) stack.add(f);
-    done += frames.length;
-    onFrame?.(done, n);
-    if (frames.length < count) break;
-  }
+  const span = plan.end - plan.start;
+  const fps = n < plan.frames ? Math.max(0.01, n / (span / v.speed)) : plan.outFps;
+  streamFrames(ff, path, { start: plan.start, duration: span, count: n, fps, speed: v.speed, width, height }, (img, i) => {
+    stack.add(img);
+    onFrame?.(i + 1, n);
+  });
   return stack.result();
 }
 
@@ -152,7 +197,7 @@ async function handlePreview(req: Extract<Request, { type: 'preview' }>): Promis
     let still: Img | null;
     if (frameCache?.key === key) still = frameCache.frames[0];
     else {
-      still = await stillStackFrames(f.path!, plan, v, w, h, 48);
+      still = await engine.use(req.fileId, (ff, path) => stillStack(ff, path, plan, v, w, h, 48));
       if (still) frameCache = { key, frames: [still] };
     }
     if (!still) throw new Error('could not decode video');
@@ -167,7 +212,7 @@ async function handlePreview(req: Extract<Request, { type: 'preview' }>): Promis
   let frames: Img[];
   if (frameCache?.key === key) frames = frameCache.frames;
   else {
-    frames = await decodeFrames(f.path!, { start: frameTime(plan, v, s), count, fps: plan.outFps, speed: v.speed, width: w, height: h }, 'prev');
+    frames = await engine.use(req.fileId, (ff, path) => decodeFrames(ff, path, { start: frameTime(plan, v, s), count, fps: plan.outFps, speed: v.speed, width: w, height: h }));
     if (!frames.length) throw new Error('could not decode this frame');
     frameCache = { key, frames };
   }
@@ -201,16 +246,11 @@ async function handlePreview(req: Extract<Request, { type: 'preview' }>): Promis
 }
 
 // ---------------------------------------------------------------- exports
-let exportSeq = 0;
-
-async function withVideo<T>(file: Blob, fn: (path: string, meta: VideoMeta) => Promise<T>): Promise<T> {
-  const path = `exp_${++exportSeq}.${extOf(file)}`;
-  try {
-    const meta = await openVideo(path, file);
-    return await fn(path, meta);
-  } finally {
-    await removeFile(path);
-  }
+/** A fresh engine with the video mounted (no copy) and probed. */
+async function openForExport(file: Blob): Promise<{ ff: FFInstance; path: string; meta: VideoMeta }> {
+  const ff = await FFInstance.create();
+  const path = ff.mount('export', file, extOf(file));
+  return { ff, path, meta: probeVideo(ff, path) };
 }
 
 /** Full-resolution source for a still export (image, or one video frame / still stack). */
@@ -220,16 +260,17 @@ async function fullResSource(file: Blob, kind: FileKind, video: VideoSettings, t
     return { img: d.img, isVideo: false, note: d.note };
   }
   const v = normalizeVideo(video);
-  return withVideo(file, async (path, meta) => {
+  return withFreshEngines(async () => {
+    const { ff, path, meta } = await openForExport(file);
     const plan = planVideo(meta, v);
     if (v.stackOn && v.stackOutput === 'still') {
-      const img = await stillStackFrames(path, plan, v, plan.width, plan.height, plan.frames, (d, n) => onProgress?.({ done: d, total: n, label: 'stacking frames' }));
-      if (!img) throw new Error('could not decode video');
+      const img = stillStack(ff, path, plan, v, plan.width, plan.height, plan.frames, (d, n) => onProgress?.({ done: d, total: n, label: `stacking frame ${d}/${n}` }));
+      if (!img) throw new Error('Could not decode this video.');
       return { img, isVideo: true };
     }
     const k = Math.max(0, Math.round(((time - plan.start) / v.speed) * plan.outFps));
-    const [img] = await decodeFrames(path, { start: frameTime(plan, v, Math.min(k, plan.frames - 1)), count: 1, fps: plan.outFps, speed: v.speed, width: plan.width, height: plan.height }, 'frame');
-    if (!img) throw new Error('could not decode this frame');
+    const [img] = decodeFrames(ff, path, { start: frameTime(plan, v, Math.min(k, plan.frames - 1)), count: 1, fps: plan.outFps, speed: v.speed, width: plan.width, height: plan.height });
+    if (!img) throw new Error('Could not decode this frame.');
     return { img, isVideo: true };
   });
 }
@@ -257,10 +298,20 @@ async function exportText(req: Extract<Request, { type: 'exportText' }>): Promis
   return { blob: new Blob([res.side.asciiText + '\n'], { type: 'text/plain' }), ext: 'txt', notes: [] };
 }
 
+/**
+ * Video export, streaming: one ffmpeg instance decodes the whole range in a
+ * single sequential pass and hands every frame to the effect pipeline as it
+ * is produced; processed frames are batched (~1 s, ≤ 96 MB as YUV) and
+ * encoded by a second instance into segments; a third joins them. Memory
+ * stays bounded and time is linear in clip length, whatever the source's
+ * keyframe interval.
+ */
 async function exportVideo(file: Blob, pipeline: Pipeline, video: VideoSettings, options: ExportOptions, onProgress: (p: Progress) => void): Promise<ExportResult> {
   const v = normalizeVideo(video);
   const format = options.videoFormat;
-  return withVideo(file, async (path, meta) => {
+  return withFreshEngines(async () => {
+    const { ff: dec, path, meta } = await openForExport(file);
+    const enc = await FFInstance.create();
     const plan = planVideo(meta, v, format === 'gif' ? options.gifFps : undefined);
     let w = plan.width, h = plan.height;
     if (format === 'gif' && options.gifWidth > 0 && options.gifWidth < w) {
@@ -271,45 +322,49 @@ async function exportVideo(file: Blob, pipeline: Pipeline, video: VideoSettings,
     const scale = w / meta.width;
     const states: RunOptions['states'] = {};
     const rolling = v.stackOn ? new RollingStack(v.stackMode, v.stackWindow) : null;
-    const perChunk = Math.max(1, Math.floor(CHUNK_BYTES / (w * h * 4)));
-    const segments: string[] = [];
     const notes = new Set<string>(plan.warnings);
-    let outW = 0, outH = 0;
-    let pending: Img[] = [];
+    const total = plan.frames;
+    let encoder: SegmentEncoder | null = null;
     let last: Img | null = null;
+    let lastPost = 0;
     const t0 = performance.now();
-    for (let k0 = 0; k0 < plan.frames; k0 += perChunk) {
-      const count = Math.min(perChunk, plan.frames - k0);
-      const src = await decodeFrames(path, { start: frameTime(plan, v, k0), count, fps: plan.outFps, speed: v.speed, width: w, height: h }, 'exp');
-      for (let i = 0; i < count; i++) {
-        const k = k0 + i;
-        // pad with the last frame if the decoder came up short at the clip end
-        const frame: Img | null = src[i] ?? src[src.length - 1] ?? last;
-        if (!frame) throw new Error('could not decode video frames');
-        last = frame;
-        const stacked = rolling ? rolling.push(frame) : frame;
-        const res = runPipeline(stacked, pipeline, { glyphs, scale, isVideo: true, frameIndex: k, t: plan.frames > 1 ? k / (plan.frames - 1) : 0, states });
-        res.side.notes.forEach((n) => notes.add(n));
-        let out = res.img;
-        if (!outW) {
-          const e = evenize(out);
-          outW = e.width;
-          outH = e.height;
-        }
-        out = out.width === outW && out.height === outH ? out : evenize(resizeNearest(out, outW, outH));
-        pending.push(out);
-        const done = k + 1;
-        const el = performance.now() - t0;
-        onProgress({ done, total: plan.frames, label: `frame ${done}/${plan.frames} · ETA ${Math.max(0, Math.round((el / done) * (plan.frames - done) / 1000))}s` });
+    const eta = (done: number): string => (done > 0 ? ` · ETA ${Math.max(0, Math.round(((performance.now() - t0) / done) * (total - done) / 1000))}s` : '');
+
+    const handle = (frame: Img, k: number): void => {
+      if (k >= total) return;
+      last = frame;
+      const stacked = rolling ? rolling.push(frame) : frame;
+      const res = runPipeline(stacked, pipeline, { glyphs, scale, isVideo: true, frameIndex: k, t: total > 1 ? k / (total - 1) : 0, states });
+      res.side.notes.forEach((n) => notes.add(n));
+      let out = res.img;
+      if (!encoder) {
+        const e = evenize(out);
+        encoder = new SegmentEncoder(enc, e.width, e.height, plan.outFps, format, options.videoQuality ?? 0.75);
       }
-      segments.push(await encodeSegment(pending, segments.length, plan.outFps, format));
-      pending = [];
-    }
-    onProgress({ done: plan.frames, total: plan.frames, label: format === 'gif' ? 'building GIF palette' : 'muxing' });
-    const data = await finishVideo(segments, format, plan.outFps);
+      const ew = encoder.width, eh = encoder.height;
+      out = out.width === ew && out.height === eh ? out : evenize(resizeNearest(out, ew, eh));
+      const done = k + 1;
+      encoder.add(out, () => onProgress({ done, total, label: `encoding frames ${done - encoder!.batchFrames + 1}–${done}${eta(done)}` }));
+      const now = performance.now();
+      if (now - lastPost > 150 || done === total) {
+        lastPost = now;
+        onProgress({ done, total, label: `frame ${done}/${total}${eta(done)}` });
+      }
+    };
+
+    onProgress({ done: 0, total, label: 'decoding' });
+    const got = streamFrames(dec, path, { start: plan.start, duration: plan.end - plan.start, count: total, fps: plan.outFps, speed: v.speed, width: w, height: h }, handle);
+    // the decoder can come up a frame or two short at the very end: repeat the last frame
+    for (let k = got; k < total && last; k++) handle(last, k);
+    const finalEncoder = encoder as SegmentEncoder | null;
+    if (!finalEncoder) throw new Error('Could not decode any frames from this video.');
+    onProgress({ done: total, total, label: 'encoding the last frames' });
+    finalEncoder.flush();
+    onProgress({ done: total, total, label: format === 'gif' ? 'building the GIF palette' : 'joining segments' });
+    const data = finishVideo(await FFInstance.create(), finalEncoder.segments, format, plan.outFps);
     const type = format === 'gif' ? 'image/gif' : format === 'webm' ? 'video/webm' : 'video/mp4';
-    return { blob: new Blob([data.slice().buffer as ArrayBuffer], { type }), ext: format, notes: [...notes], frames: plan.frames };
-  });
+    return { blob: new Blob([data.slice().buffer as ArrayBuffer], { type }), ext: format, notes: [...notes], frames: total };
+  }, () => onProgress({ done: 0, total: 1, label: 'the video engine crashed, retrying with a fresh one' }));
 }
 
 async function exportBatch(req: Extract<Request, { type: 'exportBatch' }>, id: number): Promise<ExportResult> {
@@ -381,8 +436,7 @@ self.onmessage = async (ev: MessageEvent<{ id: number; req: Request }>) => {
         return;
       }
       case 'close': {
-        const f = files.get(req.fileId);
-        if (f?.path) await removeFile(f.path);
+        engine.unmount(req.fileId);
         files.delete(req.fileId);
         if (frameCache?.key.includes(req.fileId)) frameCache = null;
         result = true;

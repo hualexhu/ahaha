@@ -254,7 +254,7 @@ dropped). Changing any parameter switches the preset to *Custom*.
 | Source | Formats |
 |---|---|
 | Image | PNG · JPEG (quality slider) · WebP (quality slider) · **Glitched JPEG (raw bytes)**: the corrupted JPEG exactly as produced by the databend stage (effects after it in the pipeline are not part of those bytes) |
-| Video | MP4 (H.264) · WebM (VP8) · animated GIF (palette-optimised; fps + width controls) · PNG/JPEG/WebP of the current frame, or of the stacked still |
+| Video | MP4 (H.264) and WebM (VP8) with a Quality slider (glitched, dithered video compresses poorly, so lower it for smaller files) · animated GIF (palette-optimised; fps + width controls) · PNG/JPEG/WebP of the current frame, or of the stacked still |
 | Batch | **Batch ZIP** applies the current pipeline to every loaded file (images in the image format, videos in the video format) |
 | ASCII | `.txt` |
 
@@ -272,7 +272,7 @@ File names: `<original>_glitchlab_<preset-or-custom>_<seed>.<ext>`, e.g.
  preview canvases    ◀──ImageBitmaps──     ├─ images: decoded + downscaled once (OffscreenCanvas)
                                            ├─ video: ffmpeg.wasm decodes the needed frames
  export button       ──export req───▶    export worker (terminated to cancel)
- progress + cancel   ◀──progress/Blob──    └─ decode chunk → effects → encode segment → concat
+ progress + cancel   ◀──progress/Blob──    └─ video: one decode pass → effects → batched encode → join
 ```
 
 * **Effects** (`glitchlab/src/effects/`) are pure functions
@@ -281,10 +281,13 @@ File names: `<original>_glitchlab_<preset-or-custom>_<seed>.<ext>`, e.g.
 * **JPEG codec** (`glitchlab/src/codec/`): a baseline encoder and a tolerant
   decoder written for GlitchLab, so the byte layout the databend functions
   corrupt is known and deterministic everywhere.
-* **Video** uses the single-threaded **ffmpeg.wasm** core, loaded directly in
-  the processing worker. Clips are streamed in chunks of ≤ 48 MB of raw frames:
-  decode chunk → run the pipeline per frame → encode a segment. The segments are
-  joined without re-encoding, so memory stays bounded regardless of clip length.
+* **Video** uses the single-threaded **ffmpeg.wasm** core, compiled once per
+  worker, with a fresh engine instance per export (a long-lived instance was
+  found to degrade). One instance decodes the clip in a single sequential pass
+  and hands each frame to the effect pipeline as it is produced; processed
+  frames are batched (~1 s) and encoded by a second instance; a third joins the
+  segments. The source file is mounted in place, never copied, and memory stays
+  bounded regardless of clip length.
 * **Performance:** a 12-megapixel image with every still effect enabled exports
   in ~3.4 s in headless Chromium on the test machine (target < 10 s). The UI
   thread keeps painting during exports (checked by an e2e test).
@@ -313,10 +316,14 @@ File names: `<original>_glitchlab_<preset-or-custom>_<seed>.<ext>`, e.g.
 * **HEIC/HEIF** images aren't supported (browsers can't decode them). Convert
   to JPEG first.
 * **Audio is dropped** from exported videos.
-* Video decoding/encoding runs in single-threaded WebAssembly: expect roughly
-  real-time or slower for 1080p (much faster at lower resolutions or for GIFs).
-  The video file is held in memory in the worker, so very large files (≫ 1 GB)
-  may fail.
+* Video runs in single-threaded WebAssembly and the glitch effects run per
+  frame, so exports are slower than real time: a 10 s 1080p clip with the
+  default preset takes about 3–4 minutes on a typical laptop. Trim the clip,
+  set Geometry → Output scale 1/2 (about 4× faster), or export a GIF for
+  quicker results. Glitched, dithered video also compresses poorly; lower the
+  video Quality slider for smaller files.
+* Scrubbing the preview of 4K footage with long keyframe intervals can take a
+  few seconds per position (the preview decodes from the previous keyframe).
 * WebM export is VP8 (VP9 is too slow in single-threaded wasm).
 * The scrubber preview of temporal effects is approximate: it decodes a limited
   history (≤ 29 stacking + 40 datamosh frames), and the still-stack preview

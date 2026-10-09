@@ -62,7 +62,7 @@ export default function App(): ReactNode {
   const [message, setMessage] = useState<{ text: string; kind?: 'warn' | 'err' } | null>(null);
   const [sheetOpen, setSheetOpen] = useState(false);
   const [newPresetName, setNewPresetName] = useState('');
-  const [opts, setOpts] = useState<ExportOptions>({ imageFormat: 'png', videoFormat: 'mp4', quality: 0.9, gifFps: 12, gifWidth: 480 });
+  const [opts, setOpts] = useState<ExportOptions>({ imageFormat: 'png', videoFormat: 'mp4', quality: 0.9, videoQuality: 0.75, gifFps: 12, gifWidth: 480 });
   const [videoTarget, setVideoTarget] = useState<'video' | StillFmt>('video');
   const importRef = useRef<HTMLInputElement>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
@@ -555,6 +555,11 @@ export default function App(): ReactNode {
           )}
           {showQuality && (
             <Slider id="quality" label="Quality" value={opts.quality} min={0.1} max={1} step={0.01} format={(v) => String(Math.round(v * 100))} onChange={(v) => setOpts({ ...opts, quality: v })} />
+          )}
+          {isVideo && (videoMain === 'mp4' || videoMain === 'webm') && (
+            <Slider id="video-quality" label="Quality" title="Higher = larger files. Glitched, dithered video is expensive to compress." value={opts.videoQuality} min={0.1} max={1} step={0.05}
+              format={(v) => `${Math.round(v * 100)}${v >= 0.9 ? ' · large files' : v <= 0.4 ? ' · small files' : ''}`}
+              onChange={(v) => setOpts({ ...opts, videoQuality: v })} />
           )}
           <button type="button" className="btn btn-primary btn-block" data-testid="export" disabled={!active?.meta || !!job} onClick={exportCurrent}>
             <Icon name="download" size={16} /> Export {exportLabel}

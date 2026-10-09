@@ -147,12 +147,12 @@ decisions are appended to the relevant section.
 
 ## Video
 
-32. **Streaming in chunks.** Frames are decoded with `-ss <t> -i … -frames:v K`
-    into raw RGBA chunks of ≤ 48 MB, processed, and each chunk is encoded to its
-    own segment file (which is then deleted from MEMFS as raw data); segments are
-    joined with ffmpeg's concat demuxer (`-c copy`). Peak memory is one raw
-    chunk plus compressed segments, independent of clip length. (ffmpeg.wasm
-    can't stream stdin/stdout, so this is the practical way to bound memory.)
+32. ~~**Streaming in chunks.**~~ *Superseded by 74–79.* The first engine decoded
+    ≤ 48 MB chunks with `-ss <t> -i … -frames:v K` and encoded each chunk as a
+    segment, all in one long-lived ffmpeg instance. On real phone footage this
+    re-ran ffmpeg ~100 times per 10 s of 1080p, re-decoded from the previous
+    keyframe for every chunk (quadratic on long-keyframe sources), and the
+    instance eventually hung or crashed ("memory access out of bounds").
 33. **Frame-exact output length.** The output has exactly
     `floor((end − start) / speed × fps)` frames; if the decoder returns fewer
     at the end of the clip, the last frame is repeated. Tests verify counts.
@@ -319,3 +319,51 @@ decisions are appended to the relevant section.
     or `createImageBitmap` the empty state explains what is missing and which
     browsers work, and file picking is disabled. Missing WebAssembly only
     disables video.
+
+## Video engine v2 (after "memory access out of bounds" on a real video)
+
+74. **Diagnosis.** Reproduced with realistic clips (1080p H.264 with B-frames
+    and audio, 4K HEVC, 720p60, rotated portrait). A 1080p export hung in the
+    browser on the 49th x264 run; the very same frames encoded in 2 s in a
+    *fresh* ffmpeg instance. Conclusion: one ffmpeg.wasm instance must not be
+    reused for many runs (ffmpeg's CLI isn't designed to run repeatedly in one
+    process; state and heap degrade). Separately, per-chunk `-ss` seeking made
+    long-keyframe sources quadratic (4K HEVC: 6 → 10 s per 6-frame chunk and
+    growing).
+75. **Compile once, instantiate per job.** The 32 MB wasm module is compiled
+    once per worker; `instantiateWasm` creates fresh instances in tens of ms.
+    Exports use new instances; the preview engine is replaced after 40 runs and
+    immediately after any crash.
+76. **Single-pass streaming decode.** ffmpeg writes raw frames to a character
+    device (`FS.registerDevice`) whose write handler assembles frames and runs
+    the effect pipeline synchronously *during* the decode run. One sequential
+    decode per export, no re-seeking: 4K HEVC decoded 8.7× faster than the
+    chunked approach, 1080p H.264 at ~27 fps.
+77. **Encoding from inside the decode.** Processed frames are converted to YUV
+    4:2:0 in JS (BT.709 limited range, tagged in the output) and batched
+    (~1 s, ≤ 96 MB); each batch is encoded by a *second* ffmpeg instance called
+    synchronously from inside the first one's device callback (separate wasm
+    instances have separate memory and stacks). A third instance joins the
+    segments (`concat`, `-c copy`) or builds the GIF. Peak memory: one batch.
+78. **WORKERFS instead of copying.** Source videos are mounted with
+    `FS.mount(WORKERFS, { blobs })`, which reads the user's File in place;
+    previously the whole file was copied into memory in both workers.
+79. **ffprobe JSON for metadata** (size, frame rate, duration, display-matrix
+    rotation), with the old `ffmpeg -i` log parser as a fallback.
+80. **x264 `veryfast`, CRF from a Quality slider.** On clean footage superfast
+    was faster (11.9 vs 6.8 fps at 1080p), but on glitched, dithered frames
+    encoding is bitrate-bound: superfast CRF 20 measured 3.0 fps at 76 Mbit/s,
+    veryfast CRF 20 3.2 fps at 42 Mbit/s, veryfast CRF 23 3.4 fps at 30 Mbit/s.
+    A 10 s 1080p test export came out at 75 MB with superfast. MP4/WebM now
+    have a Quality slider (default 0.75 → x264 CRF 23, VP8 CRF 16); the GIF
+    intermediate stays at CRF 14.
+81. **Crash handling:** an engine crash during an export retries once with
+    fresh engines; a second crash produces a plain message suggesting a
+    shorter trim, Output scale 1/2 or a GIF, instead of the raw wasm error.
+    Progress shows the actual step (decoding, frame k/N, encoding frames a–b,
+    joining).
+82. **Regression coverage:** `scripts/gen-fixtures.mjs` now generates a
+    phone-like clip (long keyframe interval, B-frames, AAC audio) and a portrait
+    clip stored with a 90° rotation flag; `e2e/realistic-video.spec.ts` exports
+    both (frame counts, duration, upright 360×640 output) and runs two exports
+    in one session.

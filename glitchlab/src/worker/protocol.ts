@@ -20,6 +20,8 @@ export interface ExportOptions {
   videoFormat: VideoExportFormat;
   /** JPEG/WebP quality 0..1 */
   quality: number;
+  /** MP4/WebM quality 0..1 (mapped to the encoder's CRF; 0.75 ≈ x264's default CRF 23) */
+  videoQuality: number;
   gifFps: number;
   gifWidth: number;
 }

@@ -121,4 +121,10 @@ ff(['-i', join(out, 'gradient.png'), '-c:v', 'libwebp', '-quality', '85'], 'grad
 ff(['-f', 'lavfi', '-i', 'testsrc=size=320x240:rate=15:duration=2', '-c:v', 'libx264', '-pix_fmt', 'yuv420p', '-g', '15'], 'testsrc.mp4');
 ff(['-f', 'lavfi', '-i', 'testsrc=size=320x240:rate=15:duration=2', '-c:v', 'libvpx', '-b:v', '500k'], 'testsrc.webm');
 ff(['-f', 'lavfi', '-i', 'testsrc=size=320x240:rate=15:duration=2', '-c:v', 'libx264', '-pix_fmt', 'yuv420p'], 'testsrc.mov');
+// Phone-like clips: H.264 High with B-frames, a long keyframe interval, an audio track...
+ff(['-f', 'lavfi', '-i', 'testsrc2=size=1280x720:rate=30:duration=4', '-f', 'lavfi', '-i', 'sine=frequency=440:duration=4',
+  '-c:v', 'libx264', '-profile:v', 'high', '-preset', 'veryfast', '-bf', '3', '-g', '250', '-pix_fmt', 'yuv420p', '-c:a', 'aac', '-shortest'], 'phone.mp4');
+// ...and a portrait clip stored the way phones store it: landscape pixels + a 90° rotation flag
+ff(['-f', 'lavfi', '-i', 'testsrc2=size=640x360:rate=30:duration=2', '-c:v', 'libx264', '-preset', 'veryfast', '-pix_fmt', 'yuv420p'], 'portrait-raw.mp4');
+ff(['-i', join(out, 'portrait-raw.mp4'), '-c', 'copy', '-metadata:s:v:0', 'rotate=90'], 'portrait.mov');
 console.log('fixtures ready in', out);
