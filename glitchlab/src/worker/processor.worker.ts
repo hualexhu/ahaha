@@ -100,8 +100,9 @@ async function withFreshEngines<T>(fn: () => Promise<T>, onRetry?: () => void): 
 }
 
 // ---------------------------------------------------------------- open
-async function handleOpen(fileId: string, file: Blob, kind: FileKind): Promise<{ meta: FileMeta; thumb: ImageBitmap }> {
+async function handleOpen(fileId: string, file: Blob, kind: FileKind, onProgress: (label: string) => void): Promise<{ meta: FileMeta; thumb: ImageBitmap }> {
   if (kind === 'image') {
+    onProgress('decoding the image');
     const { img: preview, sourceWidth, sourceHeight } = await decodeImageFile(file, PREVIEW_EDGE);
     const meta: FileMeta = { kind, width: sourceWidth, height: sourceHeight, warnings: [] };
     const t = fitLongEdge(preview.width, preview.height, 160);
@@ -110,8 +111,11 @@ async function handleOpen(fileId: string, file: Blob, kind: FileKind): Promise<{
   }
   files.set(fileId, { kind, meta: { kind, width: 0, height: 0, warnings: [] }, blob: file });
   try {
+    onProgress('starting the video engine');
     const { vm, first } = await engine.use(fileId, (ff, path) => {
+      onProgress('reading the video info');
       const vm = probeVideo(ff, path);
+      onProgress('decoding the first frame');
       const plan = planVideo(vm, normalizeVideo(undefined));
       const t = fitLongEdge(plan.width, plan.height, 160);
       const [first] = decodeFrames(ff, path, { start: 0, count: 1, fps: vm.fps, speed: 1, width: even(t.width), height: even(t.height) });
@@ -120,8 +124,8 @@ async function handleOpen(fileId: string, file: Blob, kind: FileKind): Promise<{
     const plan = planVideo(vm, normalizeVideo(undefined));
     const meta: FileMeta = { kind, width: vm.width, height: vm.height, duration: vm.duration, fps: vm.fps, warnings: plan.warnings };
     files.set(fileId, { kind, meta, videoMeta: vm, blob: file });
-    const thumbImg = first ?? { width: 2, height: 2, data: new Uint8ClampedArray(16) };
-    return { meta, thumb: imgToBitmap(thumbImg) };
+    if (!first) throw new Error('Could not decode the first frame of this video.');
+    return { meta, thumb: imgToBitmap(first) };
   } catch (e) {
     files.delete(fileId);
     throw e;
@@ -162,6 +166,7 @@ function stillStack(ff: FFInstance, path: string, plan: VideoPlan, v: VideoSetti
 
 // ---------------------------------------------------------------- preview
 async function handlePreview(req: Extract<Request, { type: 'preview' }>): Promise<PreviewResult> {
+  await opening.get(req.fileId)?.catch(() => undefined);
   const t0 = performance.now();
   const f = files.get(req.fileId);
   if (!f) throw new Error('file not open');
@@ -213,7 +218,7 @@ async function handlePreview(req: Extract<Request, { type: 'preview' }>): Promis
   if (frameCache?.key === key) frames = frameCache.frames;
   else {
     frames = await engine.use(req.fileId, (ff, path) => decodeFrames(ff, path, { start: frameTime(plan, v, s), count, fps: plan.outFps, speed: v.speed, width: w, height: h }));
-    if (!frames.length) throw new Error('could not decode this frame');
+    if (!frames.length) throw new Error('No frame at this position (the clip may end earlier than its header says). Move the scrubber back a little.');
     frameCache = { key, frames };
   }
   const states: RunOptions['states'] = {};
@@ -325,6 +330,9 @@ async function exportVideo(file: Blob, pipeline: Pipeline, video: VideoSettings,
     const notes = new Set<string>(plan.warnings);
     const total = plan.frames;
     let encoder: SegmentEncoder | null = null;
+    /** Frames already handed to the encoder in finished batches. */
+    let encodedUpTo = 0;
+    let processed = 0;
     let last: Img | null = null;
     let lastPost = 0;
     const t0 = performance.now();
@@ -340,11 +348,21 @@ async function exportVideo(file: Blob, pipeline: Pipeline, video: VideoSettings,
       if (!encoder) {
         const e = evenize(out);
         encoder = new SegmentEncoder(enc, e.width, e.height, plan.outFps, format, options.videoQuality ?? 0.75);
+        const enc0 = encoder;
+        let lastEnc = 0;
+        enc0.onProgress = (i, n) => {
+          const now = performance.now();
+          if (now - lastEnc < 150) return;
+          lastEnc = now;
+          const end = Math.min(total, encodedUpTo + n);
+          onProgress({ done: processed, total, label: `encoding frames ${encodedUpTo + 1}–${end} (${i}/${n})${eta(processed)}` });
+        };
       }
       const ew = encoder.width, eh = encoder.height;
       out = out.width === ew && out.height === eh ? out : evenize(resizeNearest(out, ew, eh));
       const done = k + 1;
-      encoder.add(out, () => onProgress({ done, total, label: `encoding frames ${done - encoder!.batchFrames + 1}–${done}${eta(done)}` }));
+      processed = done;
+      if (encoder.add(out, () => onProgress({ done, total, label: `encoding frames ${encodedUpTo + 1}–${done}${eta(done)}` }))) encodedUpTo = done;
       const now = performance.now();
       if (now - lastPost > 150 || done === total) {
         lastPost = now;
@@ -418,6 +436,35 @@ async function pumpPreviews(): Promise<void> {
 
 const errMsg = (e: unknown): string => (e instanceof Error ? e.message : String(e));
 
+/**
+ * Opens run one at a time with a short gap between them, so that dropping
+ * many files at once doesn't block the active file's preview until every
+ * other file has been probed (each ffmpeg run blocks the worker).
+ */
+const opening = new Map<string, Promise<unknown>>();
+let openChain: Promise<unknown> = Promise.resolve();
+const sleep = (ms: number): Promise<void> => new Promise((r) => setTimeout(r, ms));
+
+function queueOpen(id: number, req: Extract<Request, { type: 'open' }>): void {
+  const ahead = opening.size;
+  const progress = (label: string): void => post({ id, kind: 'progress', progress: { done: 0, total: 0, label } });
+  if (ahead) progress(ahead === 1 ? 'waiting for 1 other file' : `waiting for ${ahead} other files`);
+  const job = openChain.then(async () => {
+    try {
+      const r = await handleOpen(req.fileId, req.file, req.kind, progress);
+      post({ id, kind: 'result', result: r }, [r.thumb]);
+    } catch (e) {
+      post({ id, kind: 'error', error: errMsg(e) });
+      throw e;
+    }
+  });
+  opening.set(req.fileId, job);
+  openChain = job.catch(() => undefined).then(() => {
+    if (opening.get(req.fileId) === job) opening.delete(req.fileId);
+    return sleep(opening.size ? 120 : 0);
+  });
+}
+
 self.onmessage = async (ev: MessageEvent<{ id: number; req: Request }>) => {
   const { id, req } = ev.data;
   if (req.type === 'preview') {
@@ -430,15 +477,18 @@ self.onmessage = async (ev: MessageEvent<{ id: number; req: Request }>) => {
   try {
     let result: unknown;
     switch (req.type) {
-      case 'open': {
-        const r = await handleOpen(req.fileId, req.file, req.kind);
-        post({ id, kind: 'result', result: r }, [r.thumb]);
+      case 'open':
+        queueOpen(id, req);
         return;
-      }
       case 'close': {
-        engine.unmount(req.fileId);
-        files.delete(req.fileId);
-        if (frameCache?.key.includes(req.fileId)) frameCache = null;
+        const forget = (): void => {
+          engine.unmount(req.fileId);
+          files.delete(req.fileId);
+          if (frameCache?.key.includes(req.fileId)) frameCache = null;
+        };
+        forget();
+        // still queued or opening: forget it again once that finishes
+        void opening.get(req.fileId)?.then(forget, forget);
         result = true;
         break;
       }

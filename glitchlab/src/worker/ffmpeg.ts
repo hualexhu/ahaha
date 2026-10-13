@@ -88,23 +88,39 @@ export function isEngineCrash(e: unknown): boolean {
 }
 
 export class FFInstance {
-  private sink: ((line: string) => void) | null = null;
+  private sink: ((line: string, type: string) => void) | null = null;
   private mounts = new Map<string, string>();
   private runs = 0;
   private constructor(private readonly ff: FFmpegCore) {
-    ff.setLogger((e) => this.sink?.(e.message));
+    ff.setLogger((e) => this.sink?.(e.message, e.type));
   }
 
   static async create(): Promise<FFInstance> {
     const { module, factory, core, wasm } = await compileOnce();
-    const ff = await factory({
-      mainScriptUrlOrBlob: `${core}#${btoa(JSON.stringify({ wasmURL: wasm, workerURL: '' }))}`,
-      instantiateWasm: (imports: WebAssembly.Imports, receive: (i: WebAssembly.Instance, m: WebAssembly.Module) => void) => {
-        void WebAssembly.instantiate(module, imports).then((instance) => receive(instance, module));
-        return {};
-      },
-    });
-    return new FFInstance(ff);
+    // Emscripten's instantiateWasm hook has no error path: a failed
+    // instantiate would leave the factory promise pending forever, so race
+    // it against the failure and a timeout.
+    let fail!: (e: Error) => void;
+    const failed = new Promise<never>((_, reject) => (fail = reject));
+    const timer = setTimeout(() => fail(new Error('the video engine did not start (timed out)')), 30_000);
+    try {
+      const ff = await Promise.race([
+        factory({
+          mainScriptUrlOrBlob: `${core}#${btoa(JSON.stringify({ wasmURL: wasm, workerURL: '' }))}`,
+          instantiateWasm: (imports: WebAssembly.Imports, receive: (i: WebAssembly.Instance, m: WebAssembly.Module) => void) => {
+            WebAssembly.instantiate(module, imports).then(
+              (instance) => receive(instance, module),
+              (e: unknown) => fail(new Error(`the video engine did not start: ${e instanceof Error ? e.message : String(e)}`)),
+            );
+            return {};
+          },
+        }),
+        failed,
+      ]);
+      return new FFInstance(ff);
+    } finally {
+      clearTimeout(timer);
+    }
   }
 
   get fs(): EmFS {
@@ -120,14 +136,22 @@ export class FFInstance {
     return this.ff.HEAPU8.length;
   }
 
-  /** Run the ffmpeg CLI synchronously. Throws only when the engine itself crashes. */
-  run(args: string[]): { code: number; log: string[] } {
+  /**
+   * Run the ffmpeg CLI synchronously. Throws only when the engine itself
+   * crashes. `onLine` sees each log line as it is printed (mid-run), which is
+   * how long runs report progress.
+   */
+  run(args: string[], onLine?: (line: string) => void): { code: number; log: string[] } {
     const log: string[] = [];
-    this.sink = (l) => log.push(l);
+    this.sink = (l) => {
+      log.push(l);
+      onLine?.(l);
+    };
     this.runs++;
     try {
       this.ff.setTimeout(-1);
-      this.ff.exec('-nostdin', '-hide_banner', '-y', ...args);
+      // the log level is global C state: an earlier `ffprobe -v error` would otherwise silence this run's log
+      this.ff.exec('-nostdin', '-hide_banner', '-loglevel', 'info', '-y', ...args);
       const code = this.ff.ret;
       this.ff.reset();
       return { code, log };
@@ -136,17 +160,21 @@ export class FFInstance {
     }
   }
 
-  /** Run ffprobe synchronously; returns stdout+stderr lines. */
-  probe(args: string[]): { code: number; log: string[] } {
+  /** Run ffprobe synchronously; `stdout` is the report, `log` everything (stdout + stderr). */
+  probe(args: string[]): { code: number; log: string[]; stdout: string[] } {
     const log: string[] = [];
-    this.sink = (l) => log.push(l);
+    const stdout: string[] = [];
+    this.sink = (l, type) => {
+      log.push(l);
+      if (type === 'stdout') stdout.push(l);
+    };
     this.runs++;
     try {
       this.ff.setTimeout(-1);
       this.ff.ffprobe(...args);
       const code = this.ff.ret;
       this.ff.reset();
-      return { code, log };
+      return { code, log, stdout };
     } finally {
       this.sink = null;
     }

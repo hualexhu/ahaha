@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { parseProbe, rgbaToI420, vp8Crf, x264Crf } from '../../src/worker/video';
+import { parseLastTime, parseProbe, rgbaToI420, vp8Crf, x264Crf } from '../../src/worker/video';
 import { solid } from './helpers';
 
 describe('RGBA → YUV 4:2:0 (BT.709, limited range)', () => {
@@ -55,5 +55,14 @@ describe('video quality → encoder CRF', () => {
     expect(x264Crf(5)).toBe(19);
     expect(vp8Crf(1)).toBe(8);
     expect(vp8Crf(0.75)).toBe(16);
+  });
+});
+
+describe('parseLastTime', () => {
+  it('takes the furthest time= of a progress log', () => {
+    expect(parseLastTime(['frame=  10 fps=0.0 q=-1.0 size=N/A time=00:00:01.50 bitrate=N/A', 'frame=  99 fps=0.0 q=-1.0 Lsize=N/A time=00:01:03.96 bitrate=N/A speed= 300x'])).toBeCloseTo(63.96, 6);
+  });
+  it('is 0 without progress lines', () => {
+    expect(parseLastTime(['Input #0, matroska,webm, from x:', 'time=N/A'])).toBe(0);
   });
 });

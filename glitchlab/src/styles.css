@@ -678,7 +678,14 @@ input[type='range']:active::-webkit-slider-thumb { box-shadow: 0 0 0 5px var(--a
 .notice-err > svg { color: var(--err); }
 .shortcuts { display: flex; justify-content: center; gap: 18px; margin-top: 26px; color: var(--text3); font-size: 11.5px; flex-wrap: wrap; }
 .shortcuts kbd { margin-right: 3px; }
-.loading-state { display: flex; align-items: center; gap: 10px; color: var(--text2); }
+.stage-status { display: flex; align-items: flex-start; gap: 12px; max-width: 460px; color: var(--text2); background: var(--bg1); border: 1px solid var(--line); border-radius: 12px; padding: 16px 18px; }
+.stage-status > .spinner { margin-top: 3px; flex: none; }
+.stage-status > svg { flex: none; margin-top: 1px; color: var(--err); }
+.stage-status strong { display: block; color: var(--text); font-weight: 600; overflow-wrap: anywhere; }
+.stage-status p { margin: 4px 0 0; line-height: 1.5; overflow-wrap: anywhere; }
+.stage-status p::first-letter { text-transform: uppercase; }
+.stage-status .row-gap { margin-top: 12px; }
+.stage-status-err { border-color: rgba(255, 92, 108, 0.35); }
 
 .drop-overlay {
   position: fixed;

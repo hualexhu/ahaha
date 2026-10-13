@@ -315,6 +315,10 @@ File names: `<original>_glitchlab_<preset-or-custom>_<seed>.<ext>`, e.g.
 
 * **HEIC/HEIF** images aren't supported (browsers can't decode them). Convert
   to JPEG first.
+* **AV1 video** (some recent Android phones, screen recorders and downloads)
+  can't be decoded: the WebAssembly ffmpeg build has no software AV1 decoder.
+  GlitchLab says so when you open one; convert it to H.264 MP4 first. H.264,
+  HEVC/H.265 (incl. 10-bit iPhone footage), VP8/VP9 and ProRes work.
 * **Audio is dropped** from exported videos.
 * Video runs in single-threaded WebAssembly and the glitch effects run per
   frame, so exports are slower than real time: a 10 s 1080p clip with the

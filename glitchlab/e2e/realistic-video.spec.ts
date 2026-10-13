@@ -39,3 +39,41 @@ test.describe('realistic video', () => {
     expect([v.width, v.height, v.frames]).toEqual([360, 640, 60]);
   });
 });
+
+/**
+ * Files that used to leave the stage spinning on "Decoding…": each must end
+ * in either a preview or a readable error with a way out.
+ */
+test.describe('problem files', () => {
+  test.setTimeout(180_000);
+
+  test('a WebM without a duration (MediaRecorder-style) gets its real length', async ({ page }) => {
+    await page.goto('/');
+    await upload(page, ['live.webm']);
+    // 2 s at 15 fps: the length is measured from the packets, not taken as 0
+    await expect(page.getByText(/frame 1\/(29|30)\b/)).toBeVisible();
+    await page.getByTestId('fmt-mp4').click();
+    const { path } = await exportFile(page, 'export', 120_000);
+    expect(probe(path, true).frames).toBeGreaterThanOrEqual(29);
+  });
+
+  for (const [file, reason] of [
+    ['av1.mp4', /AV1/],
+    ['truncated.mp4', /damaged or incomplete/],
+  ] as const) {
+    test(`${file}: explains the problem instead of spinning, and the app keeps working`, async ({ page }) => {
+      await page.goto('/');
+      await page.getByTestId('file-input').setInputFiles([`fixtures/${file}`]);
+      const err = page.getByTestId('stage-error');
+      await expect(err).toBeVisible({ timeout: 60_000 });
+      await expect(err).toContainText(reason);
+      await expect(page.getByTestId('stage-loading')).toHaveCount(0);
+      // Retry gives the same answer (not a hang); Remove clears it; a good file still previews
+      await page.getByTestId('retry').click();
+      await expect(page.getByTestId('stage-error')).toContainText(reason, { timeout: 60_000 });
+      await err.getByRole('button', { name: 'Remove file' }).click();
+      await upload(page, ['testsrc.mp4']);
+      await expect(page.getByTestId('stage-error')).toHaveCount(0);
+    });
+  }
+});

@@ -10,6 +10,10 @@ export interface LoadedFile {
   meta?: FileMeta;
   thumb?: ImageBitmap;
   error?: string;
+  /** What opening the file is doing right now (shown while it decodes). */
+  status?: string;
+  /** When the current open attempt started (ms since epoch). */
+  openedAt?: number;
 }
 
 const VIDEO_EXT = /\.(mp4|m4v|mov|webm|mkv)$/i;

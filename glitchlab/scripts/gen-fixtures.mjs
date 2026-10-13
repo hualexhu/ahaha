@@ -6,7 +6,7 @@
  * @ffmpeg-installer/ffmpeg dev dependency).
  */
 import { execFileSync } from 'node:child_process';
-import { existsSync, mkdirSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { createRequire } from 'node:module';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -127,4 +127,21 @@ ff(['-f', 'lavfi', '-i', 'testsrc2=size=1280x720:rate=30:duration=4', '-f', 'lav
 // ...and a portrait clip stored the way phones store it: landscape pixels + a 90° rotation flag
 ff(['-f', 'lavfi', '-i', 'testsrc2=size=640x360:rate=30:duration=2', '-c:v', 'libx264', '-preset', 'veryfast', '-pix_fmt', 'yuv420p'], 'portrait-raw.mp4');
 ff(['-i', join(out, 'portrait-raw.mp4'), '-c', 'copy', '-metadata:s:v:0', 'rotate=90'], 'portrait.mov');
+// Problem files the app must explain instead of spinning on:
+// AV1 (the wasm engine has no software AV1 decoder)...
+ff(['-f', 'lavfi', '-i', 'testsrc2=size=320x240:rate=15:duration=1', '-c:v', 'libaom-av1', '-strict', '-2', '-cpu-used', '8', '-crf', '45', '-pix_fmt', 'yuv420p'], 'av1.mp4');
+// ...a download cut short (no index)...
+const truncated = join(out, 'truncated.mp4');
+if (!existsSync(truncated) || force) {
+  const whole = readFileSync(join(out, 'phone.mp4'));
+  writeFileSync(truncated, whole.subarray(0, Math.floor(whole.length * 0.6)));
+  console.log('wrote truncated.mp4');
+}
+// ...and a WebM written to a pipe, like MediaRecorder: no duration in the header.
+const live = join(out, 'live.webm');
+if (!existsSync(live) || force) {
+  const data = execFileSync(ffmpeg, ['-hide_banner', '-loglevel', 'error', '-f', 'lavfi', '-i', 'testsrc=size=320x240:rate=15:duration=2', '-c:v', 'libvpx', '-b:v', '500k', '-f', 'webm', 'pipe:1'], { maxBuffer: 64 << 20 });
+  writeFileSync(live, data);
+  console.log('wrote live.webm');
+}
 console.log('fixtures ready in', out);

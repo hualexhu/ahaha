@@ -367,3 +367,47 @@ decisions are appended to the relevant section.
     clip stored with a 90° rotation flag; `e2e/realistic-video.spec.ts` exports
     both (frame counts, duration, upright 360×640 output) and runs two exports
     in one session.
+
+### Opening files never spins forever (after "it's stuck at trying to decode")
+
+83. **No silent hang paths.** Emscripten's `instantiateWasm` hook has no error
+    path, so a failed instantiate left the engine promise pending forever; it
+    is now raced against the failure and a 30 s timeout. Previously a video
+    whose frames couldn't be decoded still "opened" (black placeholder
+    thumbnail) and the stage then waited for a preview that only produced a
+    small error chip, so the spinner never stopped; opening now fails with
+    the reason.
+84. **Watchdog in the worker client.** ffmpeg runs are synchronous, so a
+    stuck run can't be interrupted from inside the worker. Requests carry a
+    timeout (open 120 s, preview 120 s, long-exposure preview 10 min); on
+    expiry the worker is terminated and replaced, the request fails with a
+    plain message, every other in-flight request is re-sent under its id,
+    and files the old worker had opened are re-opened automatically.
+85. **The stage says what it's doing.** While a file opens, the stage card
+    shows the step (starting the video engine / reading the video info /
+    decoding the first frame / rendering the preview) and elapsed seconds.
+    A failure replaces the spinner with the reason plus Retry and Remove.
+86. **Plain-language decode errors** from ffmpeg's log: AV1 (the wasm build
+    has no software AV1 decoder; its native decoder needs hardware), missing
+    decoders, truncated files ("moov atom not found").
+87. **ffprobe leaves the log level behind.** `ffprobe -v error` sets
+    ffmpeg's global log level and it persisted for later runs in the same
+    instance, hiding stream info and progress lines. Every run now passes
+    `-loglevel info`; ffprobe's JSON is read from stdout only, so decoder
+    warnings on stderr can't corrupt it.
+88. **Missing duration is measured.** MediaRecorder/streamed WebM has no
+    duration in its header and was treated as a 1-frame clip; the duration is
+    now taken from a packet-copy pass (`-c copy -f null`, no decoding, ~0.1 s)
+    plus one frame.
+89. **Opens are queued** one at a time with a short gap, and a preview waits
+    only for its own file: dropping 8 videos at once shows the first preview
+    in ~1.3 s and all thumbnails in ~4 s, instead of the active file waiting
+    behind every other probe.
+90. **Live encoder progress.** The x264/VP8 batch runs report `frame=` lines
+    through the logger mid-run (`-stats_period 0.25`), so the export card
+    counts through each batch instead of freezing for several seconds.
+91. **Regression fixtures** (generated, not downloaded): an AV1 clip, a
+    truncated MP4, and a VP8 WebM written to a pipe (no duration, like
+    MediaRecorder). e2e checks each ends in a preview or an explanation with
+    a working Retry/Remove; unit tests cover the watchdog with a fake Worker.
+

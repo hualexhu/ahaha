@@ -5,7 +5,7 @@ import { BUILTIN_PRESETS, exportPresetsJson, loadUserPresets, parsePresets, save
 import { randomSeed } from './core/rng';
 import { DEFAULT_VIDEO, normalizeVideo, planVideo, type VideoSettings } from './core/video';
 import type { Params } from './effects/types';
-import { CancelledError, SupersededError, WorkerClient } from './worker/client';
+import { CancelledError, SupersededError, TimeoutError, WorkerClient } from './worker/client';
 import type { ExportOptions, ExportResult, FileMeta, ImageExportFormat, PreviewResult, Progress, VideoExportFormat } from './worker/protocol';
 import { EffectPanel } from './ui/EffectPanel';
 import { ACCEPT, FileStrip, classify, type LoadedFile } from './ui/FileStrip';
@@ -21,6 +21,11 @@ const previewWorker = new WorkerClient('glitchlab-preview');
 const exportWorker = new WorkerClient('glitchlab-export');
 
 let fileSeq = 0;
+
+/** Watchdogs: opening only probes + decodes one frame; a long-exposure preview reads the whole clip. */
+const OPEN_TIMEOUT_MS = 120_000;
+const PREVIEW_TIMEOUT_MS = 120_000;
+const STILL_PREVIEW_TIMEOUT_MS = 600_000;
 
 function download(blob: Blob, name: string): void {
   const url = URL.createObjectURL(blob);
@@ -57,6 +62,7 @@ export default function App(): ReactNode {
   const [renders, setRenders] = useState(0);
   const [previewBusy, setPreviewBusy] = useState(false);
   const [previewError, setPreviewError] = useState<string | null>(null);
+  const [previewNonce, setPreviewNonce] = useState(0);
   const [cropEditing, setCropEditing] = useState(false);
   const [job, setJob] = useState<ExportJob | null>(null);
   const [message, setMessage] = useState<{ text: string; kind?: 'warn' | 'err' } | null>(null);
@@ -91,6 +97,25 @@ export default function App(): ReactNode {
   }, []);
 
   // ------------------------------------------------------------ files
+  const openFile = useCallback((f: LoadedFile) => {
+    const patch = (p: Partial<LoadedFile>): void => setFiles((fs) => fs.map((x) => (x.id === f.id ? { ...x, ...p } : x)));
+    let status = 'decoding';
+    patch({ error: undefined, status: undefined, openedAt: Date.now() });
+    previewWorker
+      .request<{ meta: FileMeta; thumb: ImageBitmap }>({ type: 'open', fileId: f.id, file: f.file, kind: f.kind }, (p) => patch({ status: (status = p.label) }), { timeoutMs: OPEN_TIMEOUT_MS })
+      .then(({ meta, thumb }) => {
+        patch({ meta, thumb, status: undefined });
+        if (meta.warnings.length) setMessage({ text: meta.warnings.join(' '), kind: 'warn' });
+      })
+      .catch((e: Error) => {
+        const error = e instanceof TimeoutError
+          ? `Gave up decoding after ${Math.round(OPEN_TIMEOUT_MS / 1000)} s (stuck while ${status}). The file may be damaged or in a format the browser engine can't read.`
+          : e.message;
+        patch({ error, status: undefined });
+        setMessage({ text: `${f.name}: ${error}`, kind: 'err' });
+      });
+  }, []);
+
   const addFiles = useCallback((list: File[]) => {
     const skipped: string[] = [];
     const added: LoadedFile[] = [];
@@ -104,19 +129,8 @@ export default function App(): ReactNode {
     if (!added.length) return;
     setFiles((fs) => [...fs, ...added]);
     setActiveId((cur) => cur ?? added[0].id);
-    for (const f of added) {
-      previewWorker
-        .request<{ meta: FileMeta; thumb: ImageBitmap }>({ type: 'open', fileId: f.id, file: f.file, kind: f.kind })
-        .then(({ meta, thumb }) => {
-          setFiles((fs) => fs.map((x) => (x.id === f.id ? { ...x, meta, thumb } : x)));
-          if (meta.warnings.length) setMessage({ text: meta.warnings.join(' '), kind: 'warn' });
-        })
-        .catch((e: Error) => {
-          setFiles((fs) => fs.map((x) => (x.id === f.id ? { ...x, error: e.message } : x)));
-          setMessage({ text: `${f.name}: ${e.message}`, kind: 'err' });
-        });
-    }
-  }, []);
+    for (const f of added) openFile(f);
+  }, [openFile]);
 
   const removeFile = (id: string): void => {
     void previewWorker.request({ type: 'close', fileId: id }).catch(() => undefined);
@@ -131,6 +145,7 @@ export default function App(): ReactNode {
   useEffect(() => {
     setTime(0);
     setCropEditing(false);
+    setPreviewError(null);
   }, [activeId]);
 
   // ------------------------------------------------------------ preview (debounced, latest wins)
@@ -140,7 +155,11 @@ export default function App(): ReactNode {
     const handle = setTimeout(() => {
       setPreviewBusy(true);
       previewWorker
-        .request<PreviewResult>({ type: 'preview', fileId: active.id, pipeline, video, time, mode: cropEditing ? 'crop' : 'normal' })
+        .request<PreviewResult>(
+          { type: 'preview', fileId: active.id, pipeline, video, time, mode: cropEditing ? 'crop' : 'normal' },
+          undefined,
+          { timeoutMs: active.kind === 'video' && video.stackOn && video.stackOutput === 'still' ? STILL_PREVIEW_TIMEOUT_MS : PREVIEW_TIMEOUT_MS },
+        )
         .then((r) => {
           setPreview(r);
           setRenders((n) => n + 1);
@@ -149,12 +168,12 @@ export default function App(): ReactNode {
         })
         .catch((e: Error) => {
           if (e instanceof SupersededError) return;
-          setPreviewError(e.message);
+          setPreviewError(e instanceof TimeoutError ? `The preview got stuck (${e.message}) and was restarted. Press Retry or change a setting.` : e.message);
           setPreviewBusy(false);
         });
     }, 90);
     return () => clearTimeout(handle);
-  }, [active, ready, pipeline, video, time, cropEditing]);
+  }, [active, ready, pipeline, video, time, cropEditing, previewNonce]);
 
   // ------------------------------------------------------------ presets
   const applyPreset = (name: string): void => {
@@ -479,7 +498,22 @@ export default function App(): ReactNode {
           showBefore={showBefore}
           crop={cropProps}
           overlay={stageOverlay}
-          empty={active ? <div className="empty"><div className="loading-state">{active.error ? <><Icon name="warn" size={18} /> {active.error}</> : <><span className="spinner" /> Decoding {active.name}…</>}</div></div> : emptyView}
+          empty={active ? (
+            <div className="empty">
+              <StageStatus
+                file={active}
+                previewError={previewError}
+                onRetry={() => {
+                  if (active.error) openFile(active);
+                  else {
+                    setPreviewError(null);
+                    setPreviewNonce((n) => n + 1);
+                  }
+                }}
+                onRemove={() => removeFile(active.id)}
+              />
+            </div>
+          ) : emptyView}
         />
         {isVideo && active?.meta && plan && !stillOnly && (
           <div className="timeline">
@@ -576,6 +610,48 @@ export default function App(): ReactNode {
         </div>
       </aside>
       <div className="drop-overlay" aria-hidden="true"><div><Icon name="upload" size={28} /><span>Drop to add files</span></div></div>
+    </div>
+  );
+}
+
+/** Seconds since `since`, ticking. */
+function Elapsed({ since }: { since: number }): ReactNode {
+  const [now, setNow] = useState(() => Date.now());
+  useEffect(() => {
+    const t = setInterval(() => setNow(Date.now()), 1000);
+    return () => clearInterval(t);
+  }, []);
+  return <span className="mono dim">{Math.max(0, Math.floor((now - since) / 1000))} s</span>;
+}
+
+/** What the stage shows before the first preview: progress while decoding, or the error with a way out. */
+function StageStatus({ file, previewError, onRetry, onRemove }: { file: LoadedFile; previewError: string | null; onRetry: () => void; onRemove: () => void }): ReactNode {
+  const error = file.error ?? (file.meta ? previewError : null);
+  if (error) {
+    return (
+      <div className="stage-status stage-status-err" role="alert" data-testid="stage-error">
+        <Icon name="warn" size={18} />
+        <div>
+          <strong>Couldn't open {file.name}</strong>
+          <p>{error}</p>
+          <div className="row-gap">
+            <button type="button" className="btn" onClick={onRetry} data-testid="retry">Retry</button>
+            <button type="button" className="btn btn-ghost" onClick={onRemove}>Remove file</button>
+          </div>
+        </div>
+      </div>
+    );
+  }
+  const step = file.meta ? 'rendering the preview' : file.status ?? 'starting';
+  return (
+    <div className="stage-status" role="status" data-testid="stage-loading">
+      <span className="spinner" />
+      <div>
+        <strong>Decoding {file.name}…</strong>
+        <p>
+          {step} · <Elapsed since={file.openedAt ?? Date.now()} />
+        </p>
+      </div>
     </div>
   );
 }

@@ -42,8 +42,9 @@ interface ProbeStream {
 
 /** Read size, frame rate, duration and rotation with ffprobe's JSON output. */
 export function probeVideo(ff: FFInstance, path: string): VideoMeta {
-  const { log } = ff.probe(['-v', 'error', '-print_format', 'json', '-show_streams', '-show_format', '-select_streams', 'v:0', path]);
-  const text = log.join('\n');
+  // stdout only: decoder warnings on stderr would corrupt the JSON
+  const { stdout } = ff.probe(['-v', 'error', '-print_format', 'json', '-show_streams', '-show_format', '-select_streams', 'v:0', path]);
+  const text = stdout.join('\n');
   try {
     const json = JSON.parse(text.slice(text.indexOf('{'), text.lastIndexOf('}') + 1)) as { streams?: ProbeStream[]; format?: { duration?: string } };
     const s = json.streams?.[0];
@@ -53,15 +54,53 @@ export function probeVideo(ff: FFInstance, path: string): VideoMeta {
       if (Math.abs(Math.round(rot)) % 180 === 90) [width, height] = [height, width];
       const avg = ratio(s.avg_frame_rate), r = ratio(s.r_frame_rate);
       const fps = avg > 0 && avg < 1000 ? avg : r > 0 && r < 1000 ? r : 30;
-      const duration = parseFloat(s.duration ?? json.format?.duration ?? '0') || 0;
+      let duration = parseFloat(s.duration ?? json.format?.duration ?? '0') || 0;
+      // MediaRecorder WebM and some streams carry no duration: measure it
+      if (!(duration > 0)) duration = scanDuration(ff, path, fps);
       return { width, height, fps, duration };
     }
   } catch {
     /* fall through to the log parser */
   }
-  const meta = parseProbe(ff.run(['-i', path]).log);
-  if (!meta) throw new Error('Could not read this video (unsupported codec or container).');
+  const info = ff.run(['-i', path]).log;
+  const meta = parseProbe(info);
+  if (!meta) throw new Error(decodeFailure(info, 'Could not read this video (unsupported codec or container).'));
+  if (!(meta.duration > 0)) meta.duration = scanDuration(ff, path, meta.fps);
   return meta;
+}
+
+/** A plain-language reason why ffmpeg could not decode a video, from its log. */
+export function decodeFailure(log: string[], fallback = 'Could not decode this video.'): string {
+  const text = log.join('\n');
+  const codec = /Stream #\d+:\d+[^\n]*?: Video: ([\w-]+)/.exec(text)?.[1];
+  if (codec === 'av1' || /hardware accelerated AV1/i.test(text)) {
+    return 'This video is AV1, which the in-browser video engine cannot decode. Convert it to H.264 MP4 first (HandBrake, or "Most Compatible" in the camera settings).';
+  }
+  const missing = /Decoder \(codec ([\w-]+)\) not found|Unknown decoder '([\w-]+)'/.exec(text);
+  if (missing) return `This video uses the ${missing[1] ?? missing[2]} codec, which the in-browser video engine cannot decode. Convert it to H.264 MP4 first.`;
+  if (/moov atom not found|Invalid data found when processing input/i.test(text) && !codec) {
+    return 'This file looks damaged or incomplete (the video index is missing). Try re-exporting or re-downloading it.';
+  }
+  return codec ? `${fallback.replace(/\.$/, '')} (${codec}).` : fallback;
+}
+
+/** The last `time=` in an ffmpeg progress log, in seconds (0 if none). */
+export function parseLastTime(log: string[]): number {
+  let t = 0;
+  for (const line of log) {
+    for (const m of line.matchAll(/time=\s*(\d+):(\d+):(\d+(?:\.\d+)?)/g)) {
+      const v = Number(m[1]) * 3600 + Number(m[2]) * 60 + Number(m[3]);
+      if (v > t) t = v;
+    }
+  }
+  return t;
+}
+
+/** Duration by reading every video packet without decoding (fast: no pixels). */
+export function scanDuration(ff: FFInstance, path: string, fps: number): number {
+  const last = parseLastTime(ff.run(['-i', path, '-map', '0:v:0', '-c', 'copy', '-f', 'null', '-']).log);
+  // `time=` is when the last frame starts; it lasts one more frame
+  return last > 0 ? last + 1 / fps : 0;
 }
 
 // ---------------------------------------------------------------- decoding
@@ -89,8 +128,14 @@ function decodeArgs(input: string, o: DecodeOpts, output: string): string[] {
 /** Decode a few frames into memory (previews, single-frame exports). */
 export function decodeFrames(ff: FFInstance, input: string, o: DecodeOpts): Img[] {
   const out = '/tmp_frames.rgba';
-  ff.run(decodeArgs(input, o, out));
-  if (!ff.exists(out)) return [];
+  const { code, log } = ff.run(decodeArgs(input, o, out));
+  const empty = !ff.exists(out) || ff.fs.stat(out).size === 0;
+  // a failed run with nothing decoded is an error; an empty successful run is just "past the end"
+  if (empty && code !== 0) {
+    ff.remove(out);
+    throw new Error(decodeFailure(log));
+  }
+  if (empty) return [];
   const raw = ff.readAndRemove(out);
   const size = o.width * o.height * 4;
   const frames: Img[] = [];
@@ -146,7 +191,7 @@ export function streamFrames(ff: FFInstance, input: string, o: DecodeOpts, onFra
   fs.mkdev(path, dev);
   const { code, log } = ff.run(decodeArgs(input, o, path));
   ff.remove(path);
-  if (code !== 0 && index === 0) throw new Error(`Could not decode this video: ${log.slice(-2).join(' ')}`);
+  if (code !== 0 && index === 0) throw new Error(decodeFailure(log));
   return index;
 }
 
@@ -229,6 +274,9 @@ export class SegmentEncoder {
     this.batchFrames = Math.max(1, Math.min(150, Math.floor(budgetBytes / this.frameBytes)));
   }
 
+  /** Called while a batch encodes: frames of the batch done so far, batch size. */
+  onProgress: ((done: number, of: number) => void) | null = null;
+
   /** Add a frame (must already be width×height). Returns true when this call encoded a batch. */
   add(img: Img, beforeEncode?: () => void): boolean {
     if (!this.batch) this.batch = new Uint8Array(this.batchFrames * this.frameBytes);
@@ -254,10 +302,16 @@ export class SegmentEncoder {
     const codec = this.format === 'webm'
       ? ['-c:v', 'libvpx', '-b:v', '0', '-crf', String(vp8Crf(this.quality)), '-qmin', '0', '-qmax', '50', '-deadline', 'realtime', '-cpu-used', '8']
       : ['-c:v', 'libx264', '-preset', 'veryfast', '-crf', this.format === 'gif' ? '14' : String(x264Crf(this.quality)), '-g', String(Math.max(1, Math.round(this.fps)))];
+    const frames = data.length / this.frameBytes;
+    const progress = this.onProgress;
     const { code, log } = this.ff.run([
+      '-stats_period', '0.25',
       '-f', 'rawvideo', '-pix_fmt', 'yuv420p', '-s', `${this.width}x${this.height}`, '-framerate', fps, '-i', input,
       ...codec, '-pix_fmt', 'yuv420p', ...COLOR_TAGS, output,
-    ]);
+    ], progress ? (line) => {
+      const m = /frame=\s*(\d+)/.exec(line);
+      if (m) progress(Math.min(frames, Number(m[1])), frames);
+    } : undefined);
     this.ff.remove(input);
     if (code !== 0 || !this.ff.exists(output)) throw new Error(`Encoding failed (${this.format}): ${log.slice(-2).join(' ')}`);
     this.segments.push(this.ff.readAndRemove(output));
