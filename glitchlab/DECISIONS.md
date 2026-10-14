@@ -1,0 +1,413 @@
+# GlitchLab — decision log
+
+Every judgment call made while building GlitchLab, with the reason. Newest
+decisions are appended to the relevant section.
+
+## Repository & tooling
+
+1. **App lives in `glitchlab/`, wired up as an npm workspace from the repo root.**
+   The repository already contained an unrelated Rails app (`app/`, `public/`,
+   `Gemfile`, …). Vite treats `public/` as its static folder, so putting the
+   app at the root would have shipped Rails error pages in the build. A root
+   `package.json` with `"workspaces": ["glitchlab"]` proxies `dev`, `build`,
+   `test`, etc., so `npm install && npm run dev` still works from a clean clone
+   at the root. The Rails files are untouched.
+2. **TypeScript 6.0 instead of the newest 7.x.** `typescript-eslint` currently
+   declares support for TS `<6.1`; 6.0 keeps lint and typecheck consistent.
+3. **Playwright pinned to 1.56.1** because the container's pre-installed
+   Chromium build (`chromium-1194`) belongs to that release — no browser
+   download is needed.
+4. **The reference repo is cloned to `./reference/` and git-ignored.** It was
+   read only to understand the techniques; no code was copied (it has no
+   licence). All algorithms are reimplemented from scratch.
+5. **Fixture media is generated, never downloaded.** `scripts/gen-fixtures.mjs`
+   computes PNGs in JS (tiny PNG writer on top of `zlib`) and uses the ffmpeg
+   binary from the `@ffmpeg-installer/ffmpeg` dev dependency (an npm package,
+   so no extra system install) for `testsrc` videos and JPEG/WebP conversions.
+   `@ffprobe-installer/ffprobe` is used by the e2e tests to verify outputs.
+6. **Unit tests get their own `tsconfig.test.json`** (Node types) so the app
+   build never sees Node APIs.
+
+## JPEG codec & databending
+
+7. **A custom baseline JPEG encoder + tolerant decoder in TypeScript**
+   (`src/codec/`) instead of the browser's codecs or a library. Reasons:
+   - determinism: the exact bytes must be identical in the browser, the
+     worker and Node tests (same seed → byte-identical output);
+   - control: the databend functions need to know the exact file layout
+     (one DQT segment per table, 4 DHT tables, one interleaved scan);
+   - the decoder must behave like libjpeg on damaged data — keep going and
+     smear/garble instead of throwing — and report *structural* failure so
+     the retry/fallback safety net has something to react to;
+   - effects stay DOM-free and testable.
+   Encoded files are standard-conformant (verified against ffmpeg's decoder in
+   the unit tests), so the "glitched JPEG raw" download opens in other viewers.
+8. **Huffman tables:** the Annex-K example tables. The AC symbol lists are
+   written as the first 48 symbols followed by the remaining run/size symbols
+   generated programmatically; tests assert each table is a complete, valid
+   prefix code containing every symbol exactly once.
+9. **Chroma subsampling: 4:2:0 below quality 90, 4:4:4 from 90 up.** 4:2:0
+   gives the classic 16×16 colour-block glitch look at glitch-friendly
+   qualities; 4:4:4 at high quality makes "neutral params ≈ unchanged image"
+   hold (4:2:0 costs ~10 dB PSNR on hard colour edges).
+10. **Databend corruption order follows the camera:** zigzag → DQT → DHT →
+    scan → chroma.
+11. **DQT:** "boost low / zero high" is implemented as multiplying quantisers
+    k=1..lowCut by up to ~10× and pulling k≥highCut towards the minimum. The
+    minimum written is **1, not 0**: a zero quantiser is illegal in the spec
+    and some decoders reject it, which would break the raw-JPEG export.
+    A quantiser of 1 already makes those coefficients negligible. DC is kept.
+12. **DHT:** symbols are permuted only *within groups sharing the same
+    magnitude category* (the low nibble). Code lengths and the number of extra
+    bits read stay the same, so the stream stays in sync while run-lengths land
+    on the wrong coefficients (structural smearing rather than noise). Above
+    intensity 0.75 one code may additionally be moved to a longer length —
+    still a valid prefix code — which desynchronises decoding for a harsher
+    look. DC tables are never touched (that desyncs everything instantly).
+13. **Scan:** bytes are only changed if neither they nor the previous byte are
+    0xFF (so markers and stuffed `FF 00` pairs survive) and 0xFF is never
+    written. Intensity blends three corruption styles: single bit flips → random
+    bytes → short "transplants" of bytes from another part of the scan (the
+    camera's approach).
+14. **Scan "byte count" is per megapixel** ("Bytes / MP"). A fixed count would
+    look far more destructive in the 720 px preview than in the full-res export;
+    normalising by area keeps preview and export visually consistent.
+15. **Chroma:** amplifies chroma-table DC/mid-AC quantisers; above 0.4 it may
+    swap the Cb/Cr scan selectors (hue swap); above 0.75 it may point a chroma
+    component at the luma quant table.
+16. **Zigzag:** cyclic rotation of the 63 AC quantisers by up to 40 places,
+    plus a few random swaps scaled by intensity.
+17. **Safety net definition.** A decode "fails" when the file is structurally
+    invalid, the output is blank (luma std-dev < 1 while the input had > 4), or
+    fewer than 25 % of MCUs received real data. Then intensities are halved and
+    it retries (up to 3 retries, each with a derived seed), then falls back to
+    the previous good frame (video) or the clean JPEG round-trip / input. A
+    unit test injects a failing decoder to prove the whole chain.
+18. **Raw JPEG export = the bytes produced by the databend stage.** Effects that
+    run *after* databend in the pipeline cannot be part of a JPEG's bytes, so
+    they are not included; the option is disabled when databend is off.
+
+## Effects
+
+19. **Every effect has a `mix` (0–1) parameter.** Palette, ASCII etc. have no
+    natural "neutral" setting; `mix` gives every effect an identity point (and
+    is useful creatively).
+20. **Effect signature** is `(img, params, rng, ctx)`; `ctx` carries the
+    preview scale, frame index/time, per-effect temporal state and side outputs
+    (ASCII text, JPEG bytes, notes). `Img` is a structural twin of `ImageData`
+    so the same code runs in Node, workers and the main thread.
+21. **Pixel-unit parameters scale with the preview.** Parameters marked
+    `pixels` (8-bit block size, ASCII cell size, datamosh block size) are
+    multiplied by preview-width / full-width, so the 720 px preview looks like
+    the export.
+22. **Seeds per effect and frame:** `rng = mulberry32(hash(seed, effectType,
+    frameIndex))`, so reordering effects does not change each effect's random
+    stream, and every video frame gets fresh glitches (the classic flicker).
+23. **Viewfinder palettes** are the camera's five RGB565 4-tone palettes
+    converted to 8-bit RGB. "Tone count" 2–8 resamples the palette gradient.
+    Custom palettes take 2–8 colours as gradient stops.
+24. **8-bit "256-colour" = RGB 3-3-2**; **CGA = mode-4 palette 1 high intensity**
+    (black/cyan/magenta/white), the iconic 4-colour look; Game Boy = the classic
+    four greens. Quantisation happens on the block grid, so dithering and
+    palette mapping produce clean uniform blocks.
+25. **ASCII glyphs** are rasterised in the worker with `OffscreenCanvas`
+    (platform monospace font) into a coverage atlas passed to the pure effect;
+    in tests a synthetic atlas is used. Block shades (░▒▓█) are drawn as
+    patterns so they fill the cell regardless of font. The classic set is used
+    exactly as specified (`.:-=+*#%@`, dark → bright). Cells are 0.6 em wide.
+26. **Pixel sort** packs `key << 16 | index` into a `Uint32Array` and uses the
+    native typed-array sort for speed; spans shorter than 2 px are skipped.
+27. **Crop** is stored as a normalised box plus an aspect preset; ratio presets
+    shrink the box around its centre to the exact ratio. The crop box is edited
+    on a preview rendered with geometry skipped. Order inside geometry: crop →
+    rotate → flip → scale.
+
+## Built-in presets
+
+28. The six presets were tuned by rendering them side by side and adjusting
+    until each is clearly distinct and still readable (the first versions of
+    "CyberShot Green" and "Heavy Glitch" destroyed the picture completely).
+    A unit test enforces pairwise distinctness (mean abs diff > 10).
+    "Light Trails" uses lighten-stacking on video and a vertical highlight
+    pixel sort so it is still distinctive on stills.
+
+## Architecture
+
+29. **ffmpeg.wasm core used directly inside our processing worker**
+    (`@ffmpeg/core`, single-threaded) rather than through `@ffmpeg/ffmpeg`'s
+    class, which would spawn a *second, nested* worker and copy every raw frame
+    between the two. Loading the core in our own worker keeps frames in one
+    place and needs no `SharedArrayBuffer`, so no COOP/COEP headers.
+30. **Two worker instances:** one for previews (latest request wins; stale
+    queued requests are dropped) and one for exports. **Cancel = terminate the
+    export worker** — the only way to stop an ffmpeg run in progress; it is
+    recreated lazily.
+31. **HEIC is not supported** (browsers cannot decode it and a wasm HEIF decoder
+    would add megabytes). HEIC files are rejected with a clear message.
+
+## Video
+
+32. ~~**Streaming in chunks.**~~ *Superseded by 74–79.* The first engine decoded
+    ≤ 48 MB chunks with `-ss <t> -i … -frames:v K` and encoded each chunk as a
+    segment, all in one long-lived ffmpeg instance. On real phone footage this
+    re-ran ffmpeg ~100 times per 10 s of 1080p, re-decoded from the previous
+    keyframe for every chunk (quadratic on long-keyframe sources), and the
+    instance eventually hung or crashed ("memory access out of bounds").
+33. **Frame-exact output length.** The output has exactly
+    `floor((end − start) / speed × fps)` frames; if the decoder returns fewer
+    at the end of the clip, the last frame is repeated. Tests verify counts.
+34. **Timing filters:** `setpts=(PTS−STARTPTS)/speed, fps=<out>, scale=W:H`.
+    "half" fps = source fps / 2; custom fps 1–60; speed 0.25–4× in the UI
+    (0.1–8× accepted in presets).
+35. **Audio is dropped.** Speed changes, trims and stacking would need matching
+    audio processing; GlitchLab outputs silent video. Documented as a limitation.
+36. **WebM uses VP8** (`libvpx`, realtime/cpu-used 8). VP9 in single-threaded
+    wasm is several times slower; VP8 plays everywhere WebM does.
+37. **MP4 = H.264** (`libx264 veryfast`, CRF 20, yuv420p, GOP = 1 s), `+faststart`.
+    Frames are cropped to even dimensions for yuv420p.
+38. **GIF** is rendered at the chosen GIF fps and width directly (fewer, smaller
+    frames to process; pixel-size params scale along), encoded to a high-quality
+    H.264 intermediate, then a `palettegen (stats_mode=diff)` + `paletteuse
+    (bayer)` pass builds a palette-optimised GIF.
+39. **Caps:** by default clips are downscaled to fit 1920×1080 and limited to
+    60 s after the trim start, with a visible warning (never an error). A
+    "Lift 1080p / 60 s caps" switch removes them at the user's own risk.
+40. **Stacking runs on the source frames, before the effect pipeline** (long
+    exposure is a capture technique, glitches come after). It is a video
+    setting, not a pipeline effect, because its "single still" output mode
+    changes the export type. Rolling window is capped at 30 frames (a ring
+    buffer of full frames; 30 × 1080p ≈ 250 MB). The still mode folds every
+    frame into running sums/max/min: O(1) memory.
+41. **Datamosh-lite interpretation:** every `hold` frames a keyframe is taken;
+    in between, per-block motion between consecutive source frames is estimated
+    by SAD block matching on a ¼-scale luma plane (±12 px) and applied to the
+    *held* picture, plus a configurable share of the frame-to-frame residual —
+    which is what real I-frame-dropping datamoshes look like. The "glitch
+    intensity ramp" is the blend from the real frame to the moshed frame,
+    ramping from `rampFrom` to `rampTo` across each hold. It is a normal,
+    reorderable pipeline effect (so e.g. databend can run after it) and a no-op
+    on stills.
+42. **Parameter animation:** any range parameter can be animated; the slider
+    value is the clip-start value and a second slider sets the clip-end value;
+    `t = frame / (frames − 1)`. The ◆ buttons only appear for videos; still
+    exports use the start value.
+43. **Temporal previews are approximated:** the scrubber preview decodes only
+    the history it needs (stack window − 1 frames, and frames since the last
+    datamosh keyframe), capped at 29 + 40 frames, at preview resolution. For
+    history frames only the pipeline prefix up to datamosh is run
+    (`stopAfter`). The still-stack preview samples ≤ 48 frames evenly; export
+    uses every frame.
+44. **Video → image exports:** with a video loaded, PNG/JPEG/WebP export the
+    frame under the scrubber (rendered as a still) or, in stacking "single
+    still" mode, the full-resolution stack of every frame.
+45. **Video probing** parses `ffmpeg -i` output (duration, size, fps, rotation
+    metadata → width/height swapped for 90° rotations, since ffmpeg autorotates
+    on decode).
+
+## UI
+
+46. **Layout:** file strip (150 px) | preview | parameter panel (350 px); at
+    1280×800 the preview gets ~780 px. Below 760 px wide the strip becomes a
+    horizontal row and the panel a fixed bottom sheet (collapsed to a 48 px
+    handle, expands to 62 vh).
+47. **Preview debounce is 90 ms** after the last change (well inside the
+    ≤ 150 ms budget); the preview worker additionally drops queued stale
+    requests, so fast slider drags never pile up work.
+48. **Preview display scale:** shrink smoothly to fit, but only enlarge by
+    whole factors with `image-rendering: pixelated`. Non-integer upscaling of
+    dithered output produced visible moiré (spotted in the M8 screenshots).
+49. **Before/after:** "⇆ split" toggles a draggable divider (off by default so
+    the output is seen whole); Space / "◐ before" shows the original. If
+    geometry changed the output size, both sides are letterboxed (`object-fit:
+    contain`) rather than stretched.
+50. **One instance of each effect**, always present in the pipeline and toggled
+    on/off, rather than an "add effect" menu with duplicates: simpler UI, and
+    presets stay small and comparable.
+51. **Any manual change marks the pipeline "custom"** (used in file names);
+    loading a preset resets stacking unless the preset sets it.
+52. **Batch applies to every loaded file**: images use the chosen image format
+    (PNG if a video format is selected), videos use the chosen video format.
+    Duplicate names in the ZIP get `-2`, `-3` suffixes. ZIP entries are stored
+    (level 0), since PNG/JPEG/MP4 are already compressed.
+
+## Testing & docs
+
+53. **e2e runs against the production build** (`vite build && vite preview`) —
+    what gets deployed — with `E2E_DEV=1` to target the dev server; both were
+    run. Screenshots are written to `glitchlab/screenshots/` (git-ignored;
+    Playwright wipes `test-results/` on every run); the ones used in the README
+    are copied to `glitchlab/docs/screenshots/`.
+54. **UI responsiveness is measured**, not assumed: e2e tests run a
+    `requestAnimationFrame` loop during exports and assert the longest gap is
+    < 500 ms (observed: a few dozen ms).
+55. **The main README lives at the repository root** (replacing the one-line
+    `readme.md` placeholder, renamed rather than duplicated to avoid a
+    `README.md`/`readme.md` clash on case-insensitive file systems);
+    `glitchlab/README.md` points to it.
+56. **Licensing:** the `@ffmpeg/core` wasm build is GPL-2.0-or-later (it
+    includes x264). This is noted in the README because a deployed `dist/`
+    redistributes it.
+57. **Root proxy scripts end in `--`** (`npm run dev -w glitchlab --`) so extra
+    arguments reach the tool: without it, `npm run dev -- --port 3000` at the
+    root had npm swallow `--port` as its own config (found in the clean-clone
+    check).
+
+## Redesign (v2 UI)
+
+58. **From "retro terminal" to "darkroom instrument".** User feedback was that
+    the first UI felt janky. The redesign keeps the camera nod as a single
+    phosphor-green accent (switches, active icons, primary button, slider
+    fills) on calm neutral surfaces with three elevation levels, instead of
+    green-on-black everywhere. Monospace is reserved for numbers, seed,
+    timecode and file names; UI text is Inter.
+59. **Fonts are bundled** (`@fontsource-variable/inter`, `@fontsource/jetbrains-mono`)
+    rather than loaded from Google Fonts, so the app makes no third-party
+    requests and works offline — consistent with "files never leave the
+    browser".
+60. **SVG icon set** (`src/ui/Icons.tsx`, drawn for GlitchLab) replaces unicode
+    glyphs (⟳ ⇆ ◐ ⤓), which render inconsistently across fonts.
+61. **Custom primitives:** filled-track sliders with label + tabular value on
+    one line, switches for every on/off, segmented controls for any select
+    with ≤ 4 short options (native styled `<select>` otherwise, for
+    accessibility and long lists).
+62. **Effect cards** show an icon, a live one-line summary of the settings
+    (so the pipeline is readable without expanding anything), a switch and a
+    chevron. Reorder arrows and the drag grip appear on hover so they don't
+    clutter the list. Dependent controls (e.g. DQT sliders under the DQT
+    switch) are indented with a guide line.
+63. **Stage chrome floats over the image:** file/size/timing chip (top-left),
+    toasts (top-right, auto-dismiss), render spinner (bottom-right, delayed
+    150 ms so fast renders don't flicker), and a floating view toolbar
+    (Compare / Original / Reroll) at the bottom. Export progress is a floating
+    card above the toolbar. The video scrubber became a timeline bar with a
+    timecode.
+64. **Export lives in a sticky dock** at the bottom of the inspector (format
+    segmented control → big "Export <format>" button → secondary Batch / .txt),
+    so it is always one click away regardless of scroll. Preset save / delete /
+    JSON moved into a "⋯" popover next to the preset picker.
+65. **Empty state** is an explicit drop card with a primary "Choose files"
+    button, supported formats, the privacy promise and shortcuts; dragging
+    files anywhere shows a full-window drop overlay.
+66. **Mobile:** the inspector is a rounded bottom sheet with a grabber; the
+    export dock stays inside it; toolbar buttons collapse to icons.
+67. e2e selectors moved from `<select>`s to the segmented controls'
+    `data-testid`s (`fmt-png`, `v-stack-mode-lighten`, …); a `screens.spec.ts`
+    captures the design screenshots used in the README.
+
+## Cross-browser hardening
+
+68. **Only Chromium can be automated here**, so Safari/Firefox behaviour is
+    covered by *simulation*: `e2e/compat.spec.ts` intercepts the worker script
+    and prepends a patch that reproduces a browser quirk, then checks the app
+    copes. Each test was confirmed to fail on the code before the fix.
+69. **WebP on Safari:** `convertToBlob({type:'image/webp'})` returns a PNG
+    there. Every canvas encode now checks the returned MIME type; WebP falls
+    back to ffmpeg.wasm's libwebp (lazy-loaded chunk), other formats fail with
+    a clear message instead of a mislabelled file.
+70. **Decode always draws at the target size.** Resizing via
+    `createImageBitmap` options is an optimisation, not a requirement, so an
+    engine that ignores the options still gets a scaled (not cropped) preview.
+    Opening an image now decodes it once instead of twice.
+71. **Canvas size limits (iOS Safari ~16.7 MP):** if a full-size canvas is
+    refused, decode retries at ≤ 16 MP and keeps halving the area until the
+    browser accepts it; the export message says the image was scaled.
+72. **Switches no longer rely on `::after` on `<input>`** (not rendered by every
+    engine): the input is an invisible hit target over a drawn `<span>` track.
+    Also added `-webkit-backdrop-filter` (Safari < 18), `-webkit-appearance`
+    on selects and hidden number spinners in Firefox.
+73. **Feature detection at startup:** without Web Workers, `OffscreenCanvas` 2D
+    or `createImageBitmap` the empty state explains what is missing and which
+    browsers work, and file picking is disabled. Missing WebAssembly only
+    disables video.
+
+## Video engine v2 (after "memory access out of bounds" on a real video)
+
+74. **Diagnosis.** Reproduced with realistic clips (1080p H.264 with B-frames
+    and audio, 4K HEVC, 720p60, rotated portrait). A 1080p export hung in the
+    browser on the 49th x264 run; the very same frames encoded in 2 s in a
+    *fresh* ffmpeg instance. Conclusion: one ffmpeg.wasm instance must not be
+    reused for many runs (ffmpeg's CLI isn't designed to run repeatedly in one
+    process; state and heap degrade). Separately, per-chunk `-ss` seeking made
+    long-keyframe sources quadratic (4K HEVC: 6 → 10 s per 6-frame chunk and
+    growing).
+75. **Compile once, instantiate per job.** The 32 MB wasm module is compiled
+    once per worker; `instantiateWasm` creates fresh instances in tens of ms.
+    Exports use new instances; the preview engine is replaced after 40 runs and
+    immediately after any crash.
+76. **Single-pass streaming decode.** ffmpeg writes raw frames to a character
+    device (`FS.registerDevice`) whose write handler assembles frames and runs
+    the effect pipeline synchronously *during* the decode run. One sequential
+    decode per export, no re-seeking: 4K HEVC decoded 8.7× faster than the
+    chunked approach, 1080p H.264 at ~27 fps.
+77. **Encoding from inside the decode.** Processed frames are converted to YUV
+    4:2:0 in JS (BT.709 limited range, tagged in the output) and batched
+    (~1 s, ≤ 96 MB); each batch is encoded by a *second* ffmpeg instance called
+    synchronously from inside the first one's device callback (separate wasm
+    instances have separate memory and stacks). A third instance joins the
+    segments (`concat`, `-c copy`) or builds the GIF. Peak memory: one batch.
+78. **WORKERFS instead of copying.** Source videos are mounted with
+    `FS.mount(WORKERFS, { blobs })`, which reads the user's File in place;
+    previously the whole file was copied into memory in both workers.
+79. **ffprobe JSON for metadata** (size, frame rate, duration, display-matrix
+    rotation), with the old `ffmpeg -i` log parser as a fallback.
+80. **x264 `veryfast`, CRF from a Quality slider.** On clean footage superfast
+    was faster (11.9 vs 6.8 fps at 1080p), but on glitched, dithered frames
+    encoding is bitrate-bound: superfast CRF 20 measured 3.0 fps at 76 Mbit/s,
+    veryfast CRF 20 3.2 fps at 42 Mbit/s, veryfast CRF 23 3.4 fps at 30 Mbit/s.
+    A 10 s 1080p test export came out at 75 MB with superfast. MP4/WebM now
+    have a Quality slider (default 0.75 → x264 CRF 23, VP8 CRF 16); the GIF
+    intermediate stays at CRF 14.
+81. **Crash handling:** an engine crash during an export retries once with
+    fresh engines; a second crash produces a plain message suggesting a
+    shorter trim, Output scale 1/2 or a GIF, instead of the raw wasm error.
+    Progress shows the actual step (decoding, frame k/N, encoding frames a–b,
+    joining).
+82. **Regression coverage:** `scripts/gen-fixtures.mjs` now generates a
+    phone-like clip (long keyframe interval, B-frames, AAC audio) and a portrait
+    clip stored with a 90° rotation flag; `e2e/realistic-video.spec.ts` exports
+    both (frame counts, duration, upright 360×640 output) and runs two exports
+    in one session.
+
+### Opening files never spins forever (after "it's stuck at trying to decode")
+
+83. **No silent hang paths.** Emscripten's `instantiateWasm` hook has no error
+    path, so a failed instantiate left the engine promise pending forever; it
+    is now raced against the failure and a 30 s timeout. Previously a video
+    whose frames couldn't be decoded still "opened" (black placeholder
+    thumbnail) and the stage then waited for a preview that only produced a
+    small error chip, so the spinner never stopped; opening now fails with
+    the reason.
+84. **Watchdog in the worker client.** ffmpeg runs are synchronous, so a
+    stuck run can't be interrupted from inside the worker. Requests carry a
+    timeout (open 120 s, preview 120 s, long-exposure preview 10 min); on
+    expiry the worker is terminated and replaced, the request fails with a
+    plain message, every other in-flight request is re-sent under its id,
+    and files the old worker had opened are re-opened automatically.
+85. **The stage says what it's doing.** While a file opens, the stage card
+    shows the step (starting the video engine / reading the video info /
+    decoding the first frame / rendering the preview) and elapsed seconds.
+    A failure replaces the spinner with the reason plus Retry and Remove.
+86. **Plain-language decode errors** from ffmpeg's log: AV1 (the wasm build
+    has no software AV1 decoder; its native decoder needs hardware), missing
+    decoders, truncated files ("moov atom not found").
+87. **ffprobe leaves the log level behind.** `ffprobe -v error` sets
+    ffmpeg's global log level and it persisted for later runs in the same
+    instance, hiding stream info and progress lines. Every run now passes
+    `-loglevel info`; ffprobe's JSON is read from stdout only, so decoder
+    warnings on stderr can't corrupt it.
+88. **Missing duration is measured.** MediaRecorder/streamed WebM has no
+    duration in its header and was treated as a 1-frame clip; the duration is
+    now taken from a packet-copy pass (`-c copy -f null`, no decoding, ~0.1 s)
+    plus one frame.
+89. **Opens are queued** one at a time with a short gap, and a preview waits
+    only for its own file: dropping 8 videos at once shows the first preview
+    in ~1.3 s and all thumbnails in ~4 s, instead of the active file waiting
+    behind every other probe.
+90. **Live encoder progress.** The x264/VP8 batch runs report `frame=` lines
+    through the logger mid-run (`-stats_period 0.25`), so the export card
+    counts through each batch instead of freezing for several seconds.
+91. **Regression fixtures** (generated, not downloaded): an AV1 clip, a
+    truncated MP4, and a VP8 WebM written to a pipe (no duration, like
+    MediaRecorder). e2e checks each ends in a preview or an explanation with
+    a working Retry/Remove; unit tests cover the watchdog with a fake Worker.
+
